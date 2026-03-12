@@ -315,12 +315,13 @@ async function saveAnnualLeaveDaysLimit(days) {
     await setSettingValue(ANNUAL_LEAVE_DAYS_KEY, Number(days));
 }
 
-// --- Per-user allowance helpers ---
-async function getUserAnnualLeaveAllowance(slackUserId) {
+// --- Per-user per-year allowance helpers ---
+async function getUserAnnualLeaveAllowance(slackUserId, year) {
     const { data, error } = await supabase
         .from(USER_ALLOWANCE_OVERRIDE_TABLE)
         .select("annual_days")
         .eq("slack_user_id", slackUserId)
+        .eq("year", year)
         .maybeSingle();
 
     if (error) {
@@ -331,16 +332,17 @@ async function getUserAnnualLeaveAllowance(slackUserId) {
     return data ? Number(data.annual_days) : null;
 }
 
-async function setUserAnnualLeaveAllowance(slackUserId, days) {
+async function setUserAnnualLeaveAllowance(slackUserId, year, days) {
     const { error } = await supabase
         .from(USER_ALLOWANCE_OVERRIDE_TABLE)
         .upsert(
             {
                 slack_user_id: slackUserId,
+                year,
                 annual_days: Number(days),
                 updated_at: new Date().toISOString(),
             },
-            { onConflict: "slack_user_id" },
+            { onConflict: "slack_user_id,year" },
         );
 
     if (error) {
@@ -471,7 +473,7 @@ async function getAllRequestsForUser(slackUserId) {
 async function getMyHolidaySummary(slackUserId) {
     const currentYear = new Date().getFullYear();
     const globalAnnualLeaveDays = await getAnnualLeaveDaysLimit();
-    const userOverride = await getUserAnnualLeaveAllowance(slackUserId);
+    const userOverride = await getUserAnnualLeaveAllowance(slackUserId, currentYear);
     const annualLeaveDays = userOverride ?? globalAnnualLeaveDays;
     const approvedRequests = await getApprovedRequestsForUserInYear(slackUserId, currentYear);
 
@@ -501,7 +503,7 @@ async function getTeamMemberSummaries() {
     const summaries = [];
 
     for (const member of members) {
-        const userOverride = await getUserAnnualLeaveAllowance(member.slack_user_id);
+        const userOverride = await getUserAnnualLeaveAllowance(member.slack_user_id, currentYear);
         const annualLeaveDays = userOverride ?? globalAnnualLeaveDays;
         const approvedRequests = await getApprovedRequestsForUserInYear(member.slack_user_id, currentYear);
         const allRequests = await getAllRequestsForUser(member.slack_user_id);
@@ -743,13 +745,14 @@ app.view("manager_adjust_allowance_form", async ({ ack, body, view, client }) =>
             return;
         }
 
-        await setUserAnnualLeaveAllowance(slackUserId, days);
+        const currentYear = new Date().getFullYear();
+        await setUserAnnualLeaveAllowance(slackUserId, currentYear, days);
         const employeeName = await getSlackDisplayName(client, slackUserId);
 
         await notifyRequester(
             client,
             body.user.id,
-            `✅ Allowance updated for *${employeeName}* to *${days} day(s)* for the current year dashboard.`,
+            `✅ Allowance updated for *${employeeName}* to *${days} day(s)* for *${currentYear}*.`,
         );
 
         await publishHomeTab(client, body.user.id);
@@ -907,6 +910,37 @@ async function publishHomeTab(client, userId) {
             },
         });
 
+
+
+
+
+        if (upcomingTimeOff.length === 0) {
+            blocks.push({
+                type: "section",
+                text: {
+                    type: "mrkdwn",
+                    text: "No upcoming approved requests right now.",
+                },
+            });
+        } else {
+            for (const request of upcomingTimeOff) {
+                blocks.push(
+                    {
+                        type: "section",
+                        text: {
+                            type: "mrkdwn",
+                            text: `*Approved*\n\n${buildRequestDetailsText(request)}`,
+                        },
+                    },
+                    buildManagerUpcomingActionBlock(request.id),
+                    {
+                        type: "divider",
+                    },
+                );
+            }
+        }
+
+
         blocks.push(
             {
                 type: "divider",
@@ -959,31 +993,6 @@ async function publishHomeTab(client, userId) {
             }
         }
 
-        if (upcomingTimeOff.length === 0) {
-            blocks.push({
-                type: "section",
-                text: {
-                    type: "mrkdwn",
-                    text: "No upcoming approved requests right now.",
-                },
-            });
-        } else {
-            for (const request of upcomingTimeOff) {
-                blocks.push(
-                    {
-                        type: "section",
-                        text: {
-                            type: "mrkdwn",
-                            text: `*Approved*\n\n${buildRequestDetailsText(request)}`,
-                        },
-                    },
-                    buildManagerUpcomingActionBlock(request.id),
-                    {
-                        type: "divider",
-                    },
-                );
-            }
-        }
     } else {
         blocks.push(
             {
@@ -1023,7 +1032,7 @@ async function publishHomeTab(client, userId) {
                             text: `${request.status === "approved" ? "*Approved*" : "*Pending*"}\n\n${buildRequestDetailsText(request)}`,
                         },
                     },
-                    buildRequesterEditableActionBlock(request.id, request.status),
+                    buildMyRequestActionBlock(request.id, request.status),
                     {
                         type: "divider",
                     },
