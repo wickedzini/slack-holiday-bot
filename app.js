@@ -1215,8 +1215,8 @@ async function openManagerConfigModal(client, triggerId) {
     });
 }
 
-async function openAddTeamMemberModal(client, triggerId) {
-    await client.views.open({
+async function openAddTeamMemberModal(client, triggerId, method = "open") {
+    await client.views[method]({
         trigger_id: triggerId,
         view: {
             type: "modal",
@@ -1268,10 +1268,10 @@ async function openAddTeamMemberModal(client, triggerId) {
     });
 }
 
-async function openRemoveTeamMembersModal(client, triggerId) {
+async function openRemoveTeamMembersModal(client, triggerId, method = "open") {
     const teamMembers = await getTeamMembers();
 
-    await client.views.open({
+    await client.views[method]({
         trigger_id: triggerId,
         view: {
             type: "modal",
@@ -1587,7 +1587,7 @@ app.action("open_add_team_member", async ({ ack, body, client }) => {
             return;
         }
 
-        await openAddTeamMemberModal(client, body.trigger_id);
+        await openAddTeamMemberModal(client, body.trigger_id, body.view ? "push" : "open");
     } catch (error) {
         console.error("Failed to open add team member modal:", error);
     }
@@ -1605,7 +1605,7 @@ app.action("open_remove_team_members", async ({ ack, body, client }) => {
             return;
         }
 
-        await openRemoveTeamMembersModal(client, body.trigger_id);
+        await openRemoveTeamMembersModal(client, body.trigger_id, body.view ? "push" : "open");
     } catch (error) {
         console.error("Failed to open remove team members modal:", error);
     }
