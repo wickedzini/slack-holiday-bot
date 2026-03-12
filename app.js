@@ -4,6 +4,9 @@ const { createClient } = require("@supabase/supabase-js");
 console.log("SIGNING SECRET EXISTS:", !!process.env.SLACK_SIGNING_SECRET);
 console.log("BOT TOKEN EXISTS:", !!process.env.SLACK_BOT_TOKEN);
 
+console.log("SUPABASE URL EXISTS:", !!process.env.SUPABASE_URL);
+console.log("SUPABASE KEY EXISTS:", !!process.env.SUPABASE_SERVICE_ROLE_KEY);
+
 const app = new App({
   token: process.env.SLACK_BOT_TOKEN,
   signingSecret: process.env.SLACK_SIGNING_SECRET
