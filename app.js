@@ -14,6 +14,7 @@ const supabase = createClient(
 const MANAGER_IDS_KEY = "manager_user_ids";
 const ANNUAL_LEAVE_DAYS_KEY = "annual_leave_days";
 const DEFAULT_ANNUAL_LEAVE_DAYS = 26;
+const USER_ALLOWANCE_OVERRIDE_TABLE = "user_leave_allowances";
 
 const POLISH_MONTH_FORMAT = new Intl.DateTimeFormat("pl-PL", {
     day: "2-digit",
@@ -310,6 +311,39 @@ async function saveAnnualLeaveDaysLimit(days) {
     await setSettingValue(ANNUAL_LEAVE_DAYS_KEY, Number(days));
 }
 
+// --- Per-user allowance helpers ---
+async function getUserAnnualLeaveAllowance(slackUserId) {
+    const { data, error } = await supabase
+        .from(USER_ALLOWANCE_OVERRIDE_TABLE)
+        .select("annual_days")
+        .eq("slack_user_id", slackUserId)
+        .maybeSingle();
+
+    if (error) {
+        console.error("Failed to load user allowance override:", error);
+        return null;
+    }
+
+    return data ? Number(data.annual_days) : null;
+}
+
+async function setUserAnnualLeaveAllowance(slackUserId, days) {
+    const { error } = await supabase
+        .from(USER_ALLOWANCE_OVERRIDE_TABLE)
+        .upsert(
+            {
+                slack_user_id: slackUserId,
+                annual_days: Number(days),
+                updated_at: new Date().toISOString(),
+            },
+            { onConflict: "slack_user_id" },
+        );
+
+    if (error) {
+        throw error;
+    }
+}
+
 async function getUpcomingApprovedTimeOff() {
     const today = new Date().toISOString().slice(0, 10);
 
@@ -380,7 +414,9 @@ async function getApprovedRequestsForUserInYear(slackUserId, year) {
 
 async function getMyHolidaySummary(slackUserId) {
     const currentYear = new Date().getFullYear();
-    const annualLeaveDays = await getAnnualLeaveDaysLimit();
+    const globalAnnualLeaveDays = await getAnnualLeaveDaysLimit();
+    const userOverride = await getUserAnnualLeaveAllowance(slackUserId);
+    const annualLeaveDays = userOverride ?? globalAnnualLeaveDays;
     const approvedRequests = await getApprovedRequestsForUserInYear(slackUserId, currentYear);
 
     let usedWorkingDays = 0;
@@ -582,6 +618,34 @@ async function publishHomeTab(client, userId) {
                 {
                     type: "divider",
                 },
+                ...(canViewManagerDashboard
+                    ? [
+                        {
+                            type: "actions",
+                            elements: [
+                                {
+                                    type: "button",
+                                    text: {
+                                        type: "plain_text",
+                                        text: "➕ Add time off for user",
+                                    },
+                                    action_id: "manager_add_timeoff",
+                                },
+                                {
+                                    type: "button",
+                                    text: {
+                                        type: "plain_text",
+                                        text: "🧮 Adjust user allowance",
+                                    },
+                                    action_id: "manager_adjust_allowance",
+                                },
+                            ],
+                        },
+                        {
+                            type: "divider",
+                        },
+                    ]
+                    : []),
                 {
                     type: "section",
                     text: {
@@ -1052,6 +1116,94 @@ app.action("manager_edit_timeoff", async ({ ack, action, body, client }) => {
     }
 });
 
+app.action("manager_add_timeoff", async ({ ack, body, client }) => {
+    await ack();
+
+    try {
+        const managerIds = await getManagerIds();
+        const isOwner = await isWorkspaceOwner(client, body.user.id);
+
+        if (!canUseManagerDashboard(body.user.id, managerIds, isOwner)) {
+            await notifyRequester(client, body.user.id, "Only managers can add time off for users.");
+            return;
+        }
+
+        await client.views.open({
+            trigger_id: body.trigger_id,
+            view: {
+                type: "modal",
+                callback_id: "manager_add_timeoff_form",
+                title: {
+                    type: "plain_text",
+                    text: "Add time off",
+                },
+                submit: {
+                    type: "plain_text",
+                    text: "Create",
+                },
+                close: {
+                    type: "plain_text",
+                    text: "Cancel",
+                },
+                blocks: [
+                    {
+                        type: "input",
+                        block_id: "user",
+                        label: {
+                            type: "plain_text",
+                            text: "Employee",
+                        },
+                        element: {
+                            type: "users_select",
+                            action_id: "user_id",
+                        },
+                    },
+                    {
+                        type: "input",
+                        block_id: "start",
+                        label: {
+                            type: "plain_text",
+                            text: "Start date",
+                        },
+                        element: {
+                            type: "datepicker",
+                            action_id: "start_date",
+                        },
+                    },
+                    {
+                        type: "input",
+                        block_id: "end",
+                        label: {
+                            type: "plain_text",
+                            text: "End date",
+                        },
+                        element: {
+                            type: "datepicker",
+                            action_id: "end_date",
+                        },
+                    },
+                    {
+                        type: "input",
+                        block_id: "reason",
+                        optional: true,
+                        label: {
+                            type: "plain_text",
+                            text: "Reason",
+                        },
+                        element: {
+                            type: "plain_text_input",
+                            action_id: "reason_text",
+                            multiline: true,
+                        },
+                    },
+                ],
+            },
+        });
+    } catch (error) {
+        console.error("Failed to open manager add timeoff modal:", error);
+    }
+});
+
 app.action("cancel_timeoff", async ({ ack, action, body, client }) => {
     await ack();
 
@@ -1296,6 +1448,48 @@ app.view("timeoff_form", async ({ ack, body, view, client }) => {
     } catch (error) {
         console.error("Failed to save time off form:", error);
         await notifyRequester(client, slackUserId, "Could not save the time off request.");
+    }
+});
+
+app.view("manager_add_timeoff_form", async ({ ack, body, view, client }) => {
+    await ack();
+
+    try {
+        const slackUserId = view.state.values.user.user_id.selected_user;
+        const startDate = view.state.values.start.start_date.selected_date;
+        const endDate = view.state.values.end.end_date.selected_date;
+        const reason = view.state.values.reason?.reason_text?.value || "";
+
+        const employeeName = await getSlackDisplayName(client, slackUserId);
+
+        const { data, error } = await supabase
+            .from("time_off_requests")
+            .insert({
+                slack_user_id: slackUserId,
+                employee_name: employeeName,
+                start_date: startDate,
+                end_date: endDate,
+                reason,
+                status: "approved",
+            })
+            .select()
+            .single();
+
+        if (error) {
+            throw error;
+        }
+
+        await notifyRequester(
+            client,
+            slackUserId,
+            `📅 Time off added by manager.\n\n${buildReadableStatusMessage("📅", "Time off recorded", employeeName, startDate, endDate, reason)}`
+        );
+
+        await publishHomeTab(client, body.user.id);
+        await publishHomeTab(client, slackUserId);
+
+    } catch (error) {
+        console.error("Failed to create manager timeoff:", error);
     }
 });
 
