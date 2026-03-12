@@ -430,6 +430,44 @@ async function getApprovedRequestsForUserInYear(slackUserId, year) {
     return data || [];
 }
 
+async function getTeamMembersFromRequests() {
+    const { data, error } = await supabase
+        .from("time_off_requests")
+        .select("slack_user_id, employee_name")
+        .order("employee_name", { ascending: true });
+
+    if (error) {
+        throw error;
+    }
+
+    const unique = new Map();
+    for (const row of data || []) {
+        if (!row.slack_user_id) continue;
+        if (!unique.has(row.slack_user_id)) {
+            unique.set(row.slack_user_id, {
+                slack_user_id: row.slack_user_id,
+                employee_name: row.employee_name || row.slack_user_id,
+            });
+        }
+    }
+
+    return Array.from(unique.values());
+}
+
+async function getAllRequestsForUser(slackUserId) {
+    const { data, error } = await supabase
+        .from("time_off_requests")
+        .select("id, slack_user_id, employee_name, start_date, end_date, reason, status, created_at")
+        .eq("slack_user_id", slackUserId)
+        .order("start_date", { ascending: false });
+
+    if (error) {
+        throw error;
+    }
+
+    return data || [];
+}
+
 async function getMyHolidaySummary(slackUserId) {
     const currentYear = new Date().getFullYear();
     const globalAnnualLeaveDays = await getAnnualLeaveDaysLimit();
@@ -452,6 +490,45 @@ async function getMyHolidaySummary(slackUserId) {
         usedWorkingDays,
         availableWorkingDays: Math.max(annualLeaveDays - usedWorkingDays, 0),
     };
+}
+
+async function getTeamMemberSummaries() {
+    const currentYear = new Date().getFullYear();
+    const globalAnnualLeaveDays = await getAnnualLeaveDaysLimit();
+    const members = await getTeamMembersFromRequests();
+    const today = new Date().toISOString().slice(0, 10);
+
+    const summaries = [];
+
+    for (const member of members) {
+        const userOverride = await getUserAnnualLeaveAllowance(member.slack_user_id);
+        const annualLeaveDays = userOverride ?? globalAnnualLeaveDays;
+        const approvedRequests = await getApprovedRequestsForUserInYear(member.slack_user_id, currentYear);
+        const allRequests = await getAllRequestsForUser(member.slack_user_id);
+
+        let usedWorkingDays = 0;
+        for (const request of approvedRequests) {
+            const clipped = clipRequestToYear(request.start_date, request.end_date, currentYear);
+            if (!clipped) continue;
+            usedWorkingDays += calculateTimeOffStats(clipped.startDate, clipped.endDate).workingDays;
+        }
+
+        summaries.push({
+            slack_user_id: member.slack_user_id,
+            employee_name: member.employee_name,
+            annualLeaveDays,
+            usedWorkingDays,
+            availableWorkingDays: Math.max(annualLeaveDays - usedWorkingDays, 0),
+            plannedRequests: allRequests.filter(
+                (request) => request.status === "approved" && request.end_date >= today,
+            ),
+            pastRequests: allRequests.filter(
+                (request) => request.status === "approved" && request.end_date < today,
+            ),
+        });
+    }
+
+    return summaries;
 }
 
 async function getTimeOffRequestById(requestId) {
@@ -709,6 +786,7 @@ async function publishHomeTab(client, userId) {
     const myEditableRequests = await getEditableRequestsForUser(userId);
     const pendingRequests = canViewManagerDashboard ? await getPendingTimeOffRequests() : [];
     const annualLeaveDays = await getAnnualLeaveDaysLimit();
+    const teamMemberSummaries = canViewManagerDashboard ? await getTeamMemberSummaries() : [];
 
     const blocks = [
         {
@@ -828,6 +906,58 @@ async function publishHomeTab(client, userId) {
                 text: "*All upcoming team requests*",
             },
         });
+
+        blocks.push(
+            {
+                type: "divider",
+            },
+            {
+                type: "section",
+                text: {
+                    type: "mrkdwn",
+                    text: "*Team members overview*",
+                },
+            },
+        );
+
+        if (teamMemberSummaries.length === 0) {
+            blocks.push({
+                type: "section",
+                text: {
+                    type: "mrkdwn",
+                    text: "No team members with recorded time off yet.",
+                },
+            });
+        } else {
+            for (const member of teamMemberSummaries) {
+                const plannedText = member.plannedRequests.length
+                    ? member.plannedRequests
+                        .slice(0, 5)
+                        .map((request) => `• ${formatDateWithWeekday(request.start_date)} → ${formatDateWithWeekday(request.end_date)} (${buildDurationText(request.start_date, request.end_date)})`)
+                        .join("\n")
+                    : "No planned approved time off.";
+
+                const pastText = member.pastRequests.length
+                    ? member.pastRequests
+                        .slice(0, 5)
+                        .map((request) => `• ${formatDateWithWeekday(request.start_date)} → ${formatDateWithWeekday(request.end_date)} (${buildDurationText(request.start_date, request.end_date)})`)
+                        .join("\n")
+                    : "No past approved time off.";
+
+                blocks.push(
+                    {
+                        type: "section",
+                        text: {
+                            type: "mrkdwn",
+                            text: `*${member.employee_name}*\nUsed: *${member.usedWorkingDays} working day(s)*\nAvailable: *${member.availableWorkingDays} working day(s)*\nAllowance: *${member.annualLeaveDays} day(s)*\n\n*Planned time off*\n${plannedText}\n\n*Past time off*\n${pastText}`,
+                        },
+                    },
+                    {
+                        type: "divider",
+                    },
+                );
+            }
+        }
 
         if (upcomingTimeOff.length === 0) {
             blocks.push({
@@ -1695,23 +1825,3 @@ app.action("reject_timeoff", async ({ ack, action, body, client }) => {
     await app.start(process.env.PORT || 3000);
     console.log(`⚡ Slack bot running on port ${process.env.PORT || 3000}`);
 })();
-function buildRequesterEditableActionBlock(requestId, status) {
-    return {
-        type: "actions",
-        elements: [
-            {
-                type: "button",
-                text: { type: "plain_text", text: "Edit" },
-                action_id: "edit_my_timeoff",
-                value: requestId,
-            },
-            {
-                type: "button",
-                text: { type: "plain_text", text: status === "approved" ? "Cancel approved" : "Cancel request" },
-                style: "danger",
-                action_id: "cancel_timeoff",
-                value: requestId,
-            },
-        ],
-    };
-}
