@@ -1,6 +1,9 @@
 const { App } = require("@slack/bolt");
 const { createClient } = require("@supabase/supabase-js");
 
+console.log("SIGNING SECRET EXISTS:", !!process.env.SLACK_SIGNING_SECRET);
+console.log("BOT TOKEN EXISTS:", !!process.env.SLACK_BOT_TOKEN);
+
 const app = new App({
   token: process.env.SLACK_BOT_TOKEN,
   signingSecret: process.env.SLACK_SIGNING_SECRET
