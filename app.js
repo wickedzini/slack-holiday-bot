@@ -11,7 +11,9 @@ const supabase = createClient(
     process.env.SUPABASE_SERVICE_ROLE_KEY,
 );
 
-const SETTINGS_KEY = "manager_user_ids";
+const MANAGER_IDS_KEY = "manager_user_ids";
+const ANNUAL_LEAVE_DAYS_KEY = "annual_leave_days";
+const DEFAULT_ANNUAL_LEAVE_DAYS = 26;
 
 const POLISH_MONTH_FORMAT = new Intl.DateTimeFormat("pl-PL", {
     day: "2-digit",
@@ -41,6 +43,31 @@ function addUtcDays(date, days) {
     const next = new Date(date.getTime());
     next.setUTCDate(next.getUTCDate() + days);
     return next;
+}
+
+function formatDate(dateString) {
+    return POLISH_MONTH_FORMAT.format(new Date(`${dateString}T12:00:00Z`));
+}
+
+function capitalizeFirstLetter(value) {
+    if (!value) {
+        return value;
+    }
+    return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+function formatDateWithWeekday(dateString) {
+    const date = new Date(`${dateString}T12:00:00Z`);
+    const formattedDate = formatDate(dateString);
+    const weekday = capitalizeFirstLetter(POLISH_WEEKDAY_FORMAT.format(date));
+    return `${formattedDate} (${weekday})`;
+}
+
+function monthLabel(dateString) {
+    return new Date(`${dateString}T12:00:00Z`).toLocaleDateString("en-US", {
+        month: "long",
+        year: "numeric",
+    });
 }
 
 function getEasterSunday(year) {
@@ -103,7 +130,6 @@ function getPolishPublicHolidayEntries(year) {
 
 function buildHolidayListText(year) {
     const entries = getPolishPublicHolidayEntries(year);
-
     const lines = entries.map((entry) => `• ${formatDateWithWeekday(entry.date)} — ${entry.name}`);
     return `*Polish public holidays ${year}*\n\n${lines.join("\n")}`;
 }
@@ -113,10 +139,7 @@ function calculateTimeOffStats(startDateString, endDateString) {
     const end = parseDateOnly(endDateString);
 
     if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end < start) {
-        return {
-            totalDays: 0,
-            workingDays: 0,
-        };
+        return { totalDays: 0, workingDays: 0 };
     }
 
     const holidaySets = new Map();
@@ -125,8 +148,8 @@ function calculateTimeOffStats(startDateString, endDateString) {
 
     for (let current = new Date(start.getTime()); current <= end; current = addUtcDays(current, 1)) {
         totalDays += 1;
-
         const year = current.getUTCFullYear();
+
         if (!holidaySets.has(year)) {
             holidaySets.set(year, getPolishPublicHolidaySet(year));
         }
@@ -149,6 +172,54 @@ function buildDurationText(startDateString, endDateString) {
     return `${totalDays} day(s) · ${workingDays} working day(s)`;
 }
 
+function buildReadableStatusMessage(emoji, title, employeeName, startDate, endDate, reason = "") {
+    const reasonLine = reason && reason.trim() ? `\n📝 ${reason.trim()}` : "";
+    return `${emoji} *${title}*\n\n👤 *${employeeName}*\n📅 ${formatDateWithWeekday(startDate)} → ${formatDateWithWeekday(endDate)}\n⏳ ${buildDurationText(startDate, endDate)}${reasonLine}`;
+}
+
+function clipRequestToYear(startDateString, endDateString, year) {
+    const requestStart = parseDateOnly(startDateString);
+    const requestEnd = parseDateOnly(endDateString);
+    const yearStart = new Date(Date.UTC(year, 0, 1));
+    const yearEnd = new Date(Date.UTC(year, 11, 31));
+
+    const start = requestStart > yearStart ? requestStart : yearStart;
+    const end = requestEnd < yearEnd ? requestEnd : yearEnd;
+
+    if (end < start) {
+        return null;
+    }
+
+    return {
+        startDate: formatDateForStorage(start),
+        endDate: formatDateForStorage(end),
+    };
+}
+
+function buildUpcomingGroupedText(rows) {
+    if (!rows.length) {
+        return "No approved upcoming time off.";
+    }
+
+    const grouped = rows.reduce((acc, row) => {
+        const label = monthLabel(row.start_date);
+        if (!acc[label]) {
+            acc[label] = [];
+        }
+        acc[label].push(row);
+        return acc;
+    }, {});
+
+    return Object.entries(grouped)
+        .map(([label, items]) => {
+            const lines = items.map(
+                (item) => `• *${item.employee_name}* — ${formatDateWithWeekday(item.start_date)} → ${formatDateWithWeekday(item.end_date)} (${buildDurationText(item.start_date, item.end_date)})`,
+            );
+            return `*${label}*\n${lines.join("\n")}`;
+        })
+        .join("\n\n");
+}
+
 async function getSlackDisplayName(client, userId, fallback = "Unknown user") {
     try {
         const result = await client.users.info({ user: userId });
@@ -168,54 +239,75 @@ async function getSlackDisplayName(client, userId, fallback = "Unknown user") {
     }
 }
 
-function formatDate(dateString) {
-    return POLISH_MONTH_FORMAT.format(new Date(`${dateString}T12:00:00Z`));
-}
+async function getSettingValue(key) {
+    const { data, error } = await supabase
+        .from("app_settings")
+        .select("value")
+        .eq("key", key)
+        .maybeSingle();
 
-function capitalizeFirstLetter(value) {
-    if (!value) {
-        return value;
-    }
-    return value.charAt(0).toUpperCase() + value.slice(1);
-}
-
-function formatDateWithWeekday(dateString) {
-    const date = new Date(`${dateString}T12:00:00Z`);
-    const formattedDate = formatDate(dateString);
-    const weekday = capitalizeFirstLetter(POLISH_WEEKDAY_FORMAT.format(date));
-    return `${formattedDate} (${weekday})`;
-}
-
-function monthLabel(dateString) {
-    return new Date(dateString).toLocaleDateString("en-US", {
-        month: "long",
-        year: "numeric",
-    });
-}
-
-function buildUpcomingGroupedText(rows) {
-    if (!rows.length) {
-        return "No approved upcoming time off.";
+    if (error) {
+        throw error;
     }
 
-    const grouped = rows.reduce((acc, row) => {
-        const label = monthLabel(row.start_date);
-        if (!acc[label]) {
-            acc[label] = [];
-        }
-        acc[label].push(row);
-        return acc;
-    }, {});
+    return data ? data.value : null;
+}
 
-    return Object.entries(grouped)
-        .map(([label, items]) => {
+async function setSettingValue(key, value) {
+    const { error } = await supabase
+        .from("app_settings")
+        .upsert(
+            {
+                key,
+                value,
+                updated_at: new Date().toISOString(),
+            },
+            { onConflict: "key" },
+        );
 
-            const lines = items.map(
-                (item) => `• *${item.employee_name}* — ${formatDateWithWeekday(item.start_date)} → ${formatDateWithWeekday(item.end_date)} (${buildDurationText(item.start_date, item.end_date)})`,
-            );
-            return `*${label}*\n${lines.join("\n")}`;
-        })
-        .join("\n\n");
+    if (error) {
+        throw error;
+    }
+}
+
+async function isWorkspaceOwner(client, userId) {
+    try {
+        const result = await client.users.info({ user: userId });
+        const user = result.user || {};
+        return Boolean(user.is_owner || user.is_primary_owner);
+    } catch (error) {
+        console.error("Failed to verify workspace owner:", error);
+        return false;
+    }
+}
+
+async function getManagerIds() {
+    try {
+        const value = await getSettingValue(MANAGER_IDS_KEY);
+        return Array.isArray(value) ? value.filter(Boolean) : [];
+    } catch (error) {
+        console.error("Failed to load managers from app_settings:", error);
+        return [];
+    }
+}
+
+async function saveManagerIds(managerIds) {
+    await setSettingValue(MANAGER_IDS_KEY, managerIds);
+}
+
+async function getAnnualLeaveDaysLimit() {
+    try {
+        const value = await getSettingValue(ANNUAL_LEAVE_DAYS_KEY);
+        const parsed = Number(value);
+        return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_ANNUAL_LEAVE_DAYS;
+    } catch (error) {
+        console.error("Failed to load annual leave limit:", error);
+        return DEFAULT_ANNUAL_LEAVE_DAYS;
+    }
+}
+
+async function saveAnnualLeaveDaysLimit(days) {
+    await setSettingValue(ANNUAL_LEAVE_DAYS_KEY, Number(days));
 }
 
 async function getUpcomingApprovedTimeOff() {
@@ -223,7 +315,7 @@ async function getUpcomingApprovedTimeOff() {
 
     const { data, error } = await supabase
         .from("time_off_requests")
-        .select("id, employee_name, start_date, end_date, status")
+        .select("id, slack_user_id, employee_name, start_date, end_date, reason, status")
         .eq("status", "approved")
         .gte("end_date", today)
         .order("start_date", { ascending: true });
@@ -249,14 +341,14 @@ async function getPendingTimeOffRequests() {
     return data || [];
 }
 
-async function getApprovedRequestsForUser(slackUserId) {
+async function getEditableRequestsForUser(slackUserId) {
     const today = new Date().toISOString().slice(0, 10);
 
     const { data, error } = await supabase
         .from("time_off_requests")
         .select("id, slack_user_id, employee_name, start_date, end_date, reason, status, created_at")
         .eq("slack_user_id", slackUserId)
-        .eq("status", "approved")
+        .in("status", ["approved", "pending"])
         .gte("end_date", today)
         .order("start_date", { ascending: true });
 
@@ -267,55 +359,59 @@ async function getApprovedRequestsForUser(slackUserId) {
     return data || [];
 }
 
-async function isWorkspaceOwner(client, userId) {
-    try {
-        const result = await client.users.info({ user: userId });
-        const user = result.user || {};
-        return Boolean(user.is_owner || user.is_primary_owner);
-    } catch (error) {
-        console.error("Failed to verify workspace owner:", error);
-        return false;
-    }
-}
+async function getApprovedRequestsForUserInYear(slackUserId, year) {
+    const yearStart = `${year}-01-01`;
+    const yearEnd = `${year}-12-31`;
 
-async function getManagerIds() {
     const { data, error } = await supabase
-        .from("app_settings")
-        .select("value")
-        .eq("key", SETTINGS_KEY)
-        .maybeSingle();
-
-    if (error) {
-        console.error("Failed to load managers from app_settings:", error);
-        return [];
-    }
-
-    if (!data || !data.value) {
-        return [];
-    }
-
-    if (Array.isArray(data.value)) {
-        return data.value.filter(Boolean);
-    }
-
-    return [];
-}
-
-async function saveManagerIds(managerIds) {
-    const { error } = await supabase.from("app_settings").upsert(
-        {
-            key: SETTINGS_KEY,
-            value: managerIds,
-            updated_at: new Date().toISOString(),
-        },
-        {
-            onConflict: "key",
-        },
-    );
+        .from("time_off_requests")
+        .select("id, start_date, end_date, status")
+        .eq("slack_user_id", slackUserId)
+        .eq("status", "approved")
+        .lte("start_date", yearEnd)
+        .gte("end_date", yearStart);
 
     if (error) {
         throw error;
     }
+
+    return data || [];
+}
+
+async function getMyHolidaySummary(slackUserId) {
+    const currentYear = new Date().getFullYear();
+    const annualLeaveDays = await getAnnualLeaveDaysLimit();
+    const approvedRequests = await getApprovedRequestsForUserInYear(slackUserId, currentYear);
+
+    let usedWorkingDays = 0;
+    for (const request of approvedRequests) {
+        const clipped = clipRequestToYear(request.start_date, request.end_date, currentYear);
+        if (!clipped) {
+            continue;
+        }
+        usedWorkingDays += calculateTimeOffStats(clipped.startDate, clipped.endDate).workingDays;
+    }
+
+    return {
+        year: currentYear,
+        annualLeaveDays,
+        usedWorkingDays,
+        availableWorkingDays: Math.max(annualLeaveDays - usedWorkingDays, 0),
+    };
+}
+
+async function getTimeOffRequestById(requestId) {
+    const { data, error } = await supabase
+        .from("time_off_requests")
+        .select("id, slack_user_id, employee_name, start_date, end_date, reason, status")
+        .eq("id", requestId)
+        .single();
+
+    if (error) {
+        throw error;
+    }
+
+    return data;
 }
 
 function managerSummaryText(managerIds) {
@@ -330,6 +426,10 @@ function isManagerUser(userId, managerIds) {
     return managerIds.includes(userId);
 }
 
+function canUseManagerDashboard(userId, managerIds, isOwner) {
+    return isOwner || isManagerUser(userId, managerIds);
+}
+
 function buildApprovalActionBlock(requestId) {
     return {
         type: "actions",
@@ -338,7 +438,7 @@ function buildApprovalActionBlock(requestId) {
                 type: "button",
                 text: {
                     type: "plain_text",
-                    text: "Approve",
+                    text: "✅ Approve",
                 },
                 style: "primary",
                 action_id: "approve_timeoff",
@@ -348,17 +448,26 @@ function buildApprovalActionBlock(requestId) {
                 type: "button",
                 text: {
                     type: "plain_text",
-                    text: "Reject",
+                    text: "❌ Reject",
                 },
                 style: "danger",
                 action_id: "reject_timeoff",
+                value: requestId,
+            },
+            {
+                type: "button",
+                text: {
+                    type: "plain_text",
+                    text: "✏️ Edit",
+                },
+                action_id: "manager_edit_timeoff",
                 value: requestId,
             },
         ],
     };
 }
 
-function buildRequesterApprovedActionBlock(requestId) {
+function buildRequesterEditableActionBlock(requestId, status) {
     return {
         type: "actions",
         elements: [
@@ -368,14 +477,14 @@ function buildRequesterApprovedActionBlock(requestId) {
                     type: "plain_text",
                     text: "✏️ Edit",
                 },
-                action_id: "edit_approved_timeoff",
+                action_id: "edit_my_timeoff",
                 value: requestId,
             },
             {
                 type: "button",
                 text: {
                     type: "plain_text",
-                    text: "❌ Cancel",
+                    text: status === "approved" ? "🗑️ Cancel approved" : "🗑️ Cancel request",
                 },
                 style: "danger",
                 action_id: "cancel_timeoff",
@@ -385,13 +494,59 @@ function buildRequesterApprovedActionBlock(requestId) {
     };
 }
 
-function buildReadableStatusMessage(emoji, title, employeeName, startDate, endDate, reason = "") {
-    const reasonLine = reason && reason.trim() ? `\n📝 ${reason.trim()}` : "";
-    return `${emoji} *${title}*\n\n👤 *${employeeName}*\n📅 ${formatDateWithWeekday(startDate)} → ${formatDateWithWeekday(endDate)}\n⏳ ${buildDurationText(startDate, endDate)}${reasonLine}`;
+function buildTeamManagementActionBlock(requestId) {
+    return {
+        type: "actions",
+        elements: [
+            {
+                type: "button",
+                text: {
+                    type: "plain_text",
+                    text: "✏️ Edit",
+                },
+                action_id: "manager_edit_timeoff",
+                value: requestId,
+            },
+            {
+                type: "button",
+                text: {
+                    type: "plain_text",
+                    text: "🗑️ Cancel",
+                },
+                style: "danger",
+                action_id: "manager_cancel_timeoff",
+                value: requestId,
+            },
+        ],
+    };
 }
 
-function canUseManagerDashboard(userId, managerIds, isOwner) {
-    return isOwner || isManagerUser(userId, managerIds);
+function buildRequestDetailsText(request) {
+    const reasonText = request.reason && request.reason.trim() ? `\n📝 ${request.reason.trim()}` : "";
+    const statusPrefix = request.status === "approved"
+        ? "✅ *Approved*\n"
+        : request.status === "pending"
+            ? "🕒 *Pending*\n"
+            : request.status === "cancelled"
+                ? "🗑️ *Cancelled*\n"
+                : request.status === "rejected"
+                    ? "❌ *Rejected*\n"
+                    : "";
+
+    return `${statusPrefix}👤 *${request.employee_name}*\n📅 ${formatDateWithWeekday(request.start_date)} → ${formatDateWithWeekday(request.end_date)}\n⏳ ${buildDurationText(request.start_date, request.end_date)}${reasonText}`;
+}
+
+async function notifyRequester(client, slackUserId, text, blocks = null) {
+    try {
+        const dm = await client.conversations.open({ users: slackUserId });
+        await client.chat.postMessage({
+            channel: dm.channel.id,
+            text,
+            ...(blocks ? { blocks } : {}),
+        });
+    } catch (error) {
+        console.error("Requester notification failed:", error);
+    }
 }
 
 async function publishHomeTab(client, userId) {
@@ -399,9 +554,11 @@ async function publishHomeTab(client, userId) {
     const isOwner = await isWorkspaceOwner(client, userId);
     const canManageManagers = isOwner;
     const canViewManagerDashboard = canUseManagerDashboard(userId, managerIds, isOwner);
+    const annualLeaveDays = await getAnnualLeaveDaysLimit();
+    const myHolidaySummary = await getMyHolidaySummary(userId);
     const upcomingTimeOff = await getUpcomingApprovedTimeOff();
+    const myEditableRequests = await getEditableRequestsForUser(userId);
     const pendingRequests = canViewManagerDashboard ? await getPendingTimeOffRequests() : [];
-    const ownApprovedRequests = await getApprovedRequestsForUser(userId);
 
     await client.views.publish({
         user_id: userId,
@@ -412,45 +569,15 @@ async function publishHomeTab(client, userId) {
                     type: "header",
                     text: {
                         type: "plain_text",
-                        text: canViewManagerDashboard ? "Holiday Planner · Manager Dashboard" : "Holiday Planner",
+                        text: canViewManagerDashboard ? "Holiday Planner · Dashboard" : "Holiday Planner · My Holiday",
                     },
                 },
                 {
                     type: "section",
                     text: {
                         type: "mrkdwn",
-                        text: "*Manager approval settings*\nChoose managers directly from your Slack workspace.",
+                        text: `🏖️ *My Holiday*\n\n📆 Year: *${myHolidaySummary.year}*\n✅ Used: *${myHolidaySummary.usedWorkingDays} working day(s)*\n🟢 Available: *${myHolidaySummary.availableWorkingDays} working day(s)*\n📌 Annual allowance: *${annualLeaveDays} day(s)*`,
                     },
-                },
-                {
-                    type: "section",
-                    text: {
-                        type: "mrkdwn",
-                        text: `*Current managers*\n${managerSummaryText(managerIds)}`,
-                    },
-                    ...(canManageManagers
-                        ? {
-                            accessory: {
-                                type: "button",
-                                text: {
-                                    type: "plain_text",
-                                    text: "Configure managers",
-                                },
-                                action_id: "open_manager_config",
-                            },
-                        }
-                        : {}),
-                },
-                {
-                    type: "context",
-                    elements: [
-                        {
-                            type: "mrkdwn",
-                            text: canManageManagers
-                                ? "Only workspace owners can manage approvers."
-                                : "You can view the manager list, but only workspace owners can change it.",
-                        },
-                    ],
                 },
                 {
                     type: "divider",
@@ -459,7 +586,37 @@ async function publishHomeTab(client, userId) {
                     type: "section",
                     text: {
                         type: "mrkdwn",
-                        text: "🌴 *Upcoming approved time off*",
+                        text: "🧾 *Your upcoming requests*",
+                    },
+                },
+                ...(myEditableRequests.length === 0
+                    ? [
+                        {
+                            type: "section",
+                            text: {
+                                type: "mrkdwn",
+                                text: "No upcoming requests to edit right now.",
+                            },
+                        },
+                    ]
+                    : myEditableRequests.flatMap((request) => [
+                        {
+                            type: "section",
+                            text: {
+                                type: "mrkdwn",
+                                text: buildRequestDetailsText(request),
+                            },
+                        },
+                        buildRequesterEditableActionBlock(request.id, request.status),
+                    ])),
+                {
+                    type: "divider",
+                },
+                {
+                    type: "section",
+                    text: {
+                        type: "mrkdwn",
+                        text: "🌴 *Team upcoming approved time off*",
                     },
                 },
                 {
@@ -478,38 +635,41 @@ async function publishHomeTab(client, userId) {
                         },
                     ],
                 },
-                {
-                    type: "divider",
-                },
-                {
-                    type: "section",
-                    text: {
-                        type: "mrkdwn",
-                        text: "🧾 *Your approved time off*",
-                    },
-                },
-                ...(ownApprovedRequests.length === 0
-                    ? [
-                        {
-                            type: "section",
-                            text: {
-                                type: "mrkdwn",
-                                text: "No approved time off assigned to you right now.",
-                            },
-                        },
-                    ]
-                    : ownApprovedRequests.flatMap((request) => [
-                        {
-                            type: "section",
-                            text: {
-                                type: "mrkdwn",
-                                text: `*${formatDateWithWeekday(request.start_date)} → ${formatDateWithWeekday(request.end_date)}*\n${buildDurationText(request.start_date, request.end_date)}${request.reason && request.reason.trim() ? `\n📝 ${request.reason.trim()}` : ""}`,
-                            },
-                        },
-                        buildRequesterApprovedActionBlock(request.id),
-                    ])),
                 ...(canViewManagerDashboard
                     ? [
+                        {
+                            type: "divider",
+                        },
+                        {
+                            type: "section",
+                            text: {
+                                type: "mrkdwn",
+                                text: `⚙️ *Manager settings*\n\n📌 Annual leave allowance: *${annualLeaveDays} day(s)*\n👥 Managers:\n${managerSummaryText(managerIds)}`,
+                            },
+                            ...(canManageManagers
+                                ? {
+                                    accessory: {
+                                        type: "button",
+                                        text: {
+                                            type: "plain_text",
+                                            text: "Configure settings",
+                                        },
+                                        action_id: "open_manager_config",
+                                    },
+                                }
+                                : {}),
+                        },
+                        {
+                            type: "context",
+                            elements: [
+                                {
+                                    type: "mrkdwn",
+                                    text: canManageManagers
+                                        ? "Only workspace owners can change manager settings."
+                                        : "You can view settings, but only workspace owners can change them.",
+                                },
+                            ],
+                        },
                         {
                             type: "divider",
                         },
@@ -535,10 +695,40 @@ async function publishHomeTab(client, userId) {
                                     type: "section",
                                     text: {
                                         type: "mrkdwn",
-                                        text: `*${request.employee_name}*\n${formatDateWithWeekday(request.start_date)} → ${formatDateWithWeekday(request.end_date)}\n${buildDurationText(request.start_date, request.end_date)}${request.reason && request.reason.trim() ? `\n_${request.reason.trim()}_` : ""}`,
+                                        text: buildRequestDetailsText(request),
                                     },
                                 },
                                 buildApprovalActionBlock(request.id),
+                            ])),
+                        {
+                            type: "divider",
+                        },
+                        {
+                            type: "section",
+                            text: {
+                                type: "mrkdwn",
+                                text: "👥 *All upcoming team requests*\nApproved upcoming requests that managers can edit or cancel.",
+                            },
+                        },
+                        ...(upcomingTimeOff.length === 0
+                            ? [
+                                {
+                                    type: "section",
+                                    text: {
+                                        type: "mrkdwn",
+                                        text: "No upcoming approved requests right now.",
+                                    },
+                                },
+                            ]
+                            : upcomingTimeOff.flatMap((request) => [
+                                {
+                                    type: "section",
+                                    text: {
+                                        type: "mrkdwn",
+                                        text: buildRequestDetailsText(request),
+                                    },
+                                },
+                                buildTeamManagementActionBlock(request.id),
                             ])),
                     ]
                     : []),
@@ -549,6 +739,7 @@ async function publishHomeTab(client, userId) {
 
 async function openManagerConfigModal(client, triggerId) {
     const managerIds = await getManagerIds();
+    const annualLeaveDays = await getAnnualLeaveDaysLimit();
 
     await client.views.open({
         trigger_id: triggerId,
@@ -557,7 +748,7 @@ async function openManagerConfigModal(client, triggerId) {
             callback_id: "manager_config_form",
             title: {
                 type: "plain_text",
-                text: "Managers",
+                text: "Settings",
             },
             submit: {
                 type: "plain_text",
@@ -568,6 +759,19 @@ async function openManagerConfigModal(client, triggerId) {
                 text: "Cancel",
             },
             blocks: [
+                {
+                    type: "input",
+                    block_id: "annual_leave_days",
+                    label: {
+                        type: "plain_text",
+                        text: "Annual leave allowance (working days)",
+                    },
+                    element: {
+                        type: "plain_text_input",
+                        action_id: "annual_leave_days_value",
+                        initial_value: String(annualLeaveDays),
+                    },
+                },
                 {
                     type: "input",
                     block_id: "manager_ids",
@@ -599,17 +803,30 @@ async function openTimeOffModal(client, triggerId, initialValues = {}, metadata 
             private_metadata: JSON.stringify(metadata),
             title: {
                 type: "plain_text",
-                text: "New Time Off",
+                text: metadata.isEditing ? "Edit Time Off" : "New Time Off",
             },
             submit: {
                 type: "plain_text",
-                text: "Submit",
+                text: metadata.isEditing ? "Save" : "Submit",
             },
             close: {
                 type: "plain_text",
                 text: "Cancel",
             },
             blocks: [
+                ...(metadata.isEditing
+                    ? [
+                        {
+                            type: "section",
+                            text: {
+                                type: "mrkdwn",
+                                text: metadata.editMode === "manager"
+                                    ? "ℹ️ Manager edit mode. Changes are saved directly and the requester gets a notification."
+                                    : "ℹ️ If you edit an already approved request, it will go back to *pending* and managers will need to approve it again.",
+                            },
+                        },
+                    ]
+                    : []),
                 {
                     type: "input",
                     block_id: "start",
@@ -658,17 +875,14 @@ async function openTimeOffModal(client, triggerId, initialValues = {}, metadata 
 
 async function sendApprovalRequests(client, request) {
     const managerIds = await getManagerIds();
+    const targetManagers = managerIds.filter((managerId) => managerId !== request.slack_user_id);
 
-    if (!managerIds.length) {
-        console.warn("No managers configured. Approval messages were not sent.");
+    if (!targetManagers.length) {
+        console.warn("No other managers configured. Approval messages were not sent.");
         return;
     }
 
-    for (const managerId of managerIds) {
-        if (managerId === request.slack_user_id) {
-            continue;
-        }
-
+    for (const managerId of targetManagers) {
         const dm = await client.conversations.open({ users: managerId });
         await client.chat.postMessage({
             channel: dm.channel.id,
@@ -687,19 +901,6 @@ async function sendApprovalRequests(client, request) {
     }
 }
 
-async function notifyRequester(client, slackUserId, text) {
-    try {
-        const dm = await client.conversations.open({ users: slackUserId });
-        await client.chat.postMessage({
-            channel: dm.channel.id,
-            text,
-        });
-    } catch (error) {
-        console.error("Requester notification failed:", error);
-    }
-}
-
-// Helper to update approval/rejection message surface (DM, Home, etc.)
 async function updateApprovalSurface(client, body, statusLabel, data) {
     const statusEmoji = statusLabel === "Approved" ? "✅" : "❌";
     const summaryText = buildReadableStatusMessage(statusEmoji, statusLabel, data.employee_name, data.start_date, data.end_date, data.reason);
@@ -747,15 +948,7 @@ app.action("open_manager_config", async ({ ack, body, client }) => {
 
     const isOwner = await isWorkspaceOwner(client, body.user.id);
     if (!isOwner) {
-        try {
-            await client.chat.postEphemeral({
-                channel: body.user.id,
-                user: body.user.id,
-                text: "Only workspace owners can configure managers.",
-            });
-        } catch (error) {
-            console.error("Failed to send owner-only message:", error);
-        }
+        await notifyRequester(client, body.user.id, "Only workspace owners can configure settings.");
         return;
     }
 
@@ -775,20 +968,151 @@ app.view("manager_config_form", async ({ ack, body, view, client }) => {
         return;
     }
 
-    const selectedManagers =
-        view.state.values.manager_ids.selected_manager_ids.selected_users || [];
+    const selectedManagers = view.state.values.manager_ids.selected_manager_ids.selected_users || [];
+    const annualLeaveDaysRaw = view.state.values.annual_leave_days.annual_leave_days_value.value || String(DEFAULT_ANNUAL_LEAVE_DAYS);
+    const annualLeaveDays = Number(annualLeaveDaysRaw);
+
+    if (!Number.isFinite(annualLeaveDays) || annualLeaveDays <= 0) {
+        await notifyRequester(client, body.user.id, "Annual leave allowance must be a positive number.");
+        return;
+    }
 
     try {
         await saveManagerIds(selectedManagers);
+        await saveAnnualLeaveDaysLimit(annualLeaveDays);
         await publishHomeTab(client, body.user.id);
-
-        const dm = await client.conversations.open({ users: body.user.id });
-        await client.chat.postMessage({
-            channel: dm.channel.id,
-            text: `Manager list updated. Selected managers: ${selectedManagers.length ? selectedManagers.map((id) => `<@${id}>`).join(", ") : "none"}`,
-        });
+        await notifyRequester(
+            client,
+            body.user.id,
+            `⚙️ Settings updated.\n\n📌 Annual allowance: ${annualLeaveDays} day(s)\n👥 Managers: ${selectedManagers.length ? selectedManagers.map((id) => `<@${id}>`).join(", ") : "none"}`,
+        );
     } catch (error) {
         console.error("Failed to save manager settings:", error);
+    }
+});
+
+app.action("edit_my_timeoff", async ({ ack, action, body, client }) => {
+    await ack();
+
+    try {
+        const request = await getTimeOffRequestById(action.value);
+
+        if (request.slack_user_id !== body.user.id) {
+            await notifyRequester(client, body.user.id, "You can only edit your own request.");
+            return;
+        }
+
+        await openTimeOffModal(
+            client,
+            body.trigger_id,
+            {
+                startDate: request.start_date,
+                endDate: request.end_date,
+                reason: request.reason || "",
+            },
+            {
+                requestId: request.id,
+                isEditing: true,
+                editMode: "self",
+            },
+        );
+    } catch (error) {
+        console.error("Failed to open own time off for edit:", error);
+    }
+});
+
+app.action("manager_edit_timeoff", async ({ ack, action, body, client }) => {
+    await ack();
+
+    try {
+        const managerIds = await getManagerIds();
+        const isOwner = await isWorkspaceOwner(client, body.user.id);
+        if (!canUseManagerDashboard(body.user.id, managerIds, isOwner)) {
+            await notifyRequester(client, body.user.id, "Only managers can edit team requests.");
+            return;
+        }
+
+        const request = await getTimeOffRequestById(action.value);
+        await openTimeOffModal(
+            client,
+            body.trigger_id,
+            {
+                startDate: request.start_date,
+                endDate: request.end_date,
+                reason: request.reason || "",
+            },
+            {
+                requestId: request.id,
+                isEditing: true,
+                editMode: "manager",
+            },
+        );
+    } catch (error) {
+        console.error("Failed to open manager edit modal:", error);
+    }
+});
+
+app.action("cancel_timeoff", async ({ ack, action, body, client }) => {
+    await ack();
+
+    try {
+        const { data, error } = await supabase
+            .from("time_off_requests")
+            .update({ status: "cancelled" })
+            .eq("id", action.value)
+            .eq("slack_user_id", body.user.id)
+            .select()
+            .single();
+
+        if (error) {
+            throw error;
+        }
+
+        await notifyRequester(
+            client,
+            body.user.id,
+            `🗑️ Your request was cancelled.\n\n📅 ${formatDateWithWeekday(data.start_date)} → ${formatDateWithWeekday(data.end_date)}\n⏳ ${buildDurationText(data.start_date, data.end_date)}`,
+        );
+
+        await publishHomeTab(client, body.user.id);
+    } catch (error) {
+        console.error("Failed to cancel own time off:", error);
+    }
+});
+
+app.action("manager_cancel_timeoff", async ({ ack, action, body, client }) => {
+    await ack();
+
+    try {
+        const managerIds = await getManagerIds();
+        const isOwner = await isWorkspaceOwner(client, body.user.id);
+        if (!canUseManagerDashboard(body.user.id, managerIds, isOwner)) {
+            await notifyRequester(client, body.user.id, "Only managers can cancel team requests.");
+            return;
+        }
+
+        const request = await getTimeOffRequestById(action.value);
+        const { data, error } = await supabase
+            .from("time_off_requests")
+            .update({ status: "cancelled" })
+            .eq("id", request.id)
+            .select()
+            .single();
+
+        if (error) {
+            throw error;
+        }
+
+        await notifyRequester(
+            client,
+            data.slack_user_id,
+            `🗑️ Your request was cancelled by a manager.\n\n📅 ${formatDateWithWeekday(data.start_date)} → ${formatDateWithWeekday(data.end_date)}\n⏳ ${buildDurationText(data.start_date, data.end_date)}${data.reason ? `\n📝 ${data.reason}` : ""}`,
+        );
+
+        await publishHomeTab(client, body.user.id);
+        await publishHomeTab(client, data.slack_user_id);
+    } catch (error) {
+        console.error("Failed to cancel team time off:", error);
     }
 });
 
@@ -797,11 +1121,7 @@ app.command("/configure-managers", async ({ ack, body, client }) => {
 
     const isOwner = await isWorkspaceOwner(client, body.user_id);
     if (!isOwner) {
-        await client.chat.postEphemeral({
-            channel: body.channel_id,
-            user: body.user_id,
-            text: "Only workspace owners can configure managers.",
-        });
+        await notifyRequester(client, body.user_id, "Only workspace owners can configure settings.");
         return;
     }
 
@@ -812,13 +1132,11 @@ app.command("/configure-managers", async ({ ack, body, client }) => {
     }
 });
 
-
-app.command("/timeoff", async ({ ack, body, client, respond }) => {
+app.command("/timeoff", async ({ ack, respond }) => {
     await ack();
 
     try {
         const upcomingTimeOff = await getUpcomingApprovedTimeOff();
-
         await respond({
             response_type: "in_channel",
             text: "Upcoming approved time off",
@@ -856,7 +1174,7 @@ app.command("/holidays", async ({ ack, body, respond }) => {
                     type: "section",
                     text: {
                         type: "mrkdwn",
-                        text: buildHolidayListText(year),
+                        text: `🎉 ${buildHolidayListText(year)}`,
                     },
                 },
             ],
@@ -879,24 +1197,78 @@ app.view("timeoff_form", async ({ ack, body, view, client }) => {
     const reason = view.state.values.reason?.reason_text?.value || "";
     const slackUserId = body.user.id;
     const employeeName = await getSlackDisplayName(client, slackUserId, body.user.username || body.user.id);
-
     const metadata = view.private_metadata ? JSON.parse(view.private_metadata) : {};
     const editingRequestId = metadata.requestId || null;
+    const editMode = metadata.editMode || null;
 
-    const query = editingRequestId
-        ? supabase
-            .from("time_off_requests")
-            .update({
-                start_date: startDate,
-                end_date: endDate,
-                reason,
-                status: "pending",
-            })
-            .eq("id", editingRequestId)
-            .eq("slack_user_id", slackUserId)
-            .select()
-            .single()
-        : supabase
+    try {
+        if (editingRequestId) {
+            const existingRequest = await getTimeOffRequestById(editingRequestId);
+            const isOwnRequest = existingRequest.slack_user_id === slackUserId;
+            const managerIds = await getManagerIds();
+            const isOwner = await isWorkspaceOwner(client, slackUserId);
+            const canManagerEdit = canUseManagerDashboard(slackUserId, managerIds, isOwner);
+
+            if (!isOwnRequest && !canManagerEdit) {
+                await notifyRequester(client, slackUserId, "You are not allowed to edit this request.");
+                return;
+            }
+
+            const nextStatus = editMode === "manager"
+                ? existingRequest.status
+                : existingRequest.status === "approved"
+                    ? "pending"
+                    : existingRequest.status;
+
+            const { data, error } = await supabase
+                .from("time_off_requests")
+                .update({
+                    start_date: startDate,
+                    end_date: endDate,
+                    reason,
+                    status: nextStatus,
+                })
+                .eq("id", editingRequestId)
+                .select()
+                .single();
+
+            if (error) {
+                throw error;
+            }
+
+            if (editMode === "manager" && existingRequest.slack_user_id !== slackUserId) {
+                await notifyRequester(
+                    client,
+                    existingRequest.slack_user_id,
+                    `✏️ Your request was updated by a manager.\n\n📅 ${formatDateWithWeekday(startDate)} → ${formatDateWithWeekday(endDate)}\n⏳ ${buildDurationText(startDate, endDate)}${reason ? `\n📝 ${reason}` : ""}`,
+                );
+                await notifyRequester(
+                    client,
+                    slackUserId,
+                    `✏️ Team request updated.\n\n👤 ${data.employee_name}\n📅 ${formatDateWithWeekday(startDate)} → ${formatDateWithWeekday(endDate)}\n⏳ ${buildDurationText(startDate, endDate)}${reason ? `\n📝 ${reason}` : ""}`,
+                );
+            } else {
+                await notifyRequester(
+                    client,
+                    slackUserId,
+                    existingRequest.status === "approved"
+                        ? `✏️ Your approved request was updated and moved back to pending approval.\n\n📅 ${formatDateWithWeekday(startDate)} → ${formatDateWithWeekday(endDate)}\n⏳ ${buildDurationText(startDate, endDate)}${reason ? `\n📝 ${reason}` : ""}`
+                        : `✏️ Your request was updated.\n\n📅 ${formatDateWithWeekday(startDate)} → ${formatDateWithWeekday(endDate)}\n⏳ ${buildDurationText(startDate, endDate)}${reason ? `\n📝 ${reason}` : ""}`,
+                );
+            }
+
+            if (existingRequest.status === "approved" && editMode !== "manager") {
+                await sendApprovalRequests(client, data);
+            }
+
+            await publishHomeTab(client, slackUserId);
+            if (existingRequest.slack_user_id !== slackUserId) {
+                await publishHomeTab(client, existingRequest.slack_user_id);
+            }
+            return;
+        }
+
+        const { data, error } = await supabase
             .from("time_off_requests")
             .insert({
                 slack_user_id: slackUserId,
@@ -909,88 +1281,21 @@ app.view("timeoff_form", async ({ ack, body, view, client }) => {
             .select()
             .single();
 
-    const { data, error } = await query;
-
-    if (error) {
-        console.error("Supabase insert error:", error);
-
-        await notifyRequester(client, slackUserId, "Nie udało się zapisać wniosku urlopowego.");
-
-        return;
-    }
-
-    await notifyRequester(
-        client,
-        slackUserId,
-        editingRequestId
-            ? `✏️ Twój urlop został zaktualizowany i wrócił do ponownej akceptacji.\n\n📅 ${formatDateWithWeekday(startDate)} → ${formatDateWithWeekday(endDate)}\n⏳ ${buildDurationText(startDate, endDate)}${reason ? `\n📝 ${reason}` : ""}`
-            : `📝 Twój wniosek urlopowy został zapisany.\n\n📅 ${formatDateWithWeekday(startDate)} → ${formatDateWithWeekday(endDate)}\n⏳ ${buildDurationText(startDate, endDate)}${reason ? `\n📝 ${reason}` : ""}`,
-    );
-
-    try {
-        await sendApprovalRequests(client, data);
-    } catch (approvalError) {
-        console.error("Failed to send approval requests:", approvalError);
-    }
-});
-
-app.action("edit_approved_timeoff", async ({ ack, action, body, client }) => {
-    await ack();
-
-    try {
-        const { data, error } = await supabase
-            .from("time_off_requests")
-            .select("id, start_date, end_date, reason, slack_user_id")
-            .eq("id", action.value)
-            .eq("slack_user_id", body.user.id)
-            .single();
-
-        if (error) {
-            throw error;
-        }
-
-        await openTimeOffModal(
-            client,
-            body.trigger_id,
-            {
-                startDate: data.start_date,
-                endDate: data.end_date,
-                reason: data.reason || "",
-            },
-            {
-                requestId: data.id,
-            },
-        );
-    } catch (error) {
-        console.error("Failed to open approved time off for edit:", error);
-    }
-});
-
-app.action("cancel_timeoff", async ({ ack, action, body, client }) => {
-    await ack();
-
-    try {
-        const { data, error } = await supabase
-            .from("time_off_requests")
-            .update({ status: "cancelled" })
-            .eq("id", action.value)
-            .eq("slack_user_id", body.user.id)
-            .select()
-            .single();
-
         if (error) {
             throw error;
         }
 
         await notifyRequester(
             client,
-            body.user.id,
-            `❌ Twój urlop został anulowany.\n\n📅 ${formatDateWithWeekday(data.start_date)} → ${formatDateWithWeekday(data.end_date)}\n⏳ ${buildDurationText(data.start_date, data.end_date)}`,
+            slackUserId,
+            `📝 Your time off request was saved.\n\n📅 ${formatDateWithWeekday(startDate)} → ${formatDateWithWeekday(endDate)}\n⏳ ${buildDurationText(startDate, endDate)}${reason ? `\n📝 ${reason}` : ""}`,
         );
 
-        await publishHomeTab(client, body.user.id);
+        await sendApprovalRequests(client, data);
+        await publishHomeTab(client, slackUserId);
     } catch (error) {
-        console.error("Failed to cancel approved time off:", error);
+        console.error("Failed to save time off form:", error);
+        await notifyRequester(client, slackUserId, "Could not save the time off request.");
     }
 });
 
@@ -1010,20 +1315,16 @@ app.action("approve_timeoff", async ({ ack, action, body, client }) => {
         }
 
         await updateApprovalSurface(client, body, "Approved", data);
-
         await notifyRequester(
             client,
             data.slack_user_id,
-            `✅ Twój wniosek został zaakceptowany.\n\n📅 ${formatDateWithWeekday(data.start_date)} → ${formatDateWithWeekday(data.end_date)}\n⏳ ${buildDurationText(data.start_date, data.end_date)}${data.reason ? `\n📝 ${data.reason}` : ""}`,
+            `✅ Your request was approved.\n\n📅 ${formatDateWithWeekday(data.start_date)} → ${formatDateWithWeekday(data.end_date)}\n⏳ ${buildDurationText(data.start_date, data.end_date)}${data.reason ? `\n📝 ${data.reason}` : ""}`,
         );
 
         if (body.user && body.user.id) {
-            try {
-                await publishHomeTab(client, body.user.id);
-            } catch (homeError) {
-                console.error("Failed to refresh manager home after approval:", homeError);
-            }
+            await publishHomeTab(client, body.user.id);
         }
+        await publishHomeTab(client, data.slack_user_id);
     } catch (error) {
         console.error("Approval failed:", error);
     }
@@ -1045,20 +1346,16 @@ app.action("reject_timeoff", async ({ ack, action, body, client }) => {
         }
 
         await updateApprovalSurface(client, body, "Rejected", data);
-
         await notifyRequester(
             client,
             data.slack_user_id,
-            `❌ Twój wniosek został odrzucony.\n\n📅 ${formatDateWithWeekday(data.start_date)} → ${formatDateWithWeekday(data.end_date)}\n⏳ ${buildDurationText(data.start_date, data.end_date)}${data.reason ? `\n📝 ${data.reason}` : ""}`,
+            `❌ Your request was rejected.\n\n📅 ${formatDateWithWeekday(data.start_date)} → ${formatDateWithWeekday(data.end_date)}\n⏳ ${buildDurationText(data.start_date, data.end_date)}${data.reason ? `\n📝 ${data.reason}` : ""}`,
         );
 
         if (body.user && body.user.id) {
-            try {
-                await publishHomeTab(client, body.user.id);
-            } catch (homeError) {
-                console.error("Failed to refresh manager home after rejection:", homeError);
-            }
+            await publishHomeTab(client, body.user.id);
         }
+        await publishHomeTab(client, data.slack_user_id);
     } catch (error) {
         console.error("Rejection failed:", error);
     }
