@@ -446,6 +446,92 @@ async function getTeamMembers() {
     return data || [];
 }
 
+async function upsertTeamMember(slackUserId, employeeName) {
+    const { error } = await supabase
+        .from("team_members")
+        .upsert(
+            {
+                slack_user_id: slackUserId,
+                employee_name: employeeName,
+                is_active: true,
+                updated_at: new Date().toISOString(),
+            },
+            { onConflict: "slack_user_id" },
+        );
+
+    if (error) {
+        throw error;
+    }
+}
+
+async function deactivateTeamMembers(slackUserIds) {
+    if (!slackUserIds.length) {
+        return;
+    }
+
+    const { error } = await supabase
+        .from("team_members")
+        .update({
+            is_active: false,
+            updated_at: new Date().toISOString(),
+        })
+        .in("slack_user_id", slackUserIds);
+
+    if (error) {
+        throw error;
+    }
+}
+
+async function syncWorkspaceUsers(client) {
+    let cursor = undefined;
+    let synced = 0;
+
+    do {
+        const result = await client.users.list({ cursor, limit: 200 });
+        const members = result.members || [];
+
+        for (const member of members) {
+            if (!member || member.deleted || member.is_bot || member.id === "USLACKBOT") {
+                continue;
+            }
+
+            const profile = member.profile || {};
+            const employeeName =
+                profile.display_name ||
+                profile.real_name ||
+                member.real_name ||
+                member.name ||
+                member.id;
+
+            await upsertTeamMember(member.id, employeeName);
+            synced += 1;
+        }
+
+        cursor =
+            result.response_metadata && result.response_metadata.next_cursor
+                ? result.response_metadata.next_cursor
+                : undefined;
+    } while (cursor);
+
+    return synced;
+}
+
+function buildTeamMembersPreviewText(teamMembers) {
+    if (!teamMembers.length) {
+        return "No active team members yet.";
+    }
+
+    const preview = teamMembers
+        .slice(0, 10)
+        .map((member) => `• ${member.employee_name}`)
+        .join("\n");
+
+    const extraCount =
+        teamMembers.length > 10 ? `\n…and ${teamMembers.length - 10} more.` : "";
+
+    return `${preview}${extraCount}`;
+}
+
 async function getAllRequestsForUser(slackUserId) {
     const { data, error } = await supabase
         .from("time_off_requests")
@@ -780,6 +866,7 @@ async function publishHomeTab(client, userId) {
     const pendingRequests = canViewManagerDashboard ? await getPendingTimeOffRequests() : [];
     const annualLeaveDays = await getAnnualLeaveDaysLimit();
     const teamMemberSummaries = canViewManagerDashboard ? await getTeamMemberSummaries() : [];
+    const activeTeamMembers = canViewManagerDashboard ? await getTeamMembers() : [];
 
     const blocks = [
         {
@@ -827,7 +914,7 @@ async function publishHomeTab(client, userId) {
                 type: "section",
                 text: {
                     type: "mrkdwn",
-                    text: `*Manager Settings*\n\nAnnual leave allowance: *${annualLeaveDays} day(s)*\nManagers:\n${managerSummaryText(managerIds)}`,
+                    text: `*Manager Settings*\n\nAnnual leave allowance: *${annualLeaveDays} day(s)*\nManagers:\n${managerSummaryText(managerIds)}\n\n*Active team members (${activeTeamMembers.length})*\n${buildTeamMembersPreviewText(activeTeamMembers)}`,
                 },
             },
             {
@@ -842,6 +929,11 @@ async function publishHomeTab(client, userId) {
                             },
                         ]
                         : []),
+                    {
+                        type: "button",
+                        text: { type: "plain_text", text: "Manage team" },
+                        action_id: "open_team_management_panel",
+                    },
                     {
                         type: "button",
                         text: { type: "plain_text", text: "Add time off" },
@@ -1123,6 +1215,162 @@ async function openManagerConfigModal(client, triggerId) {
     });
 }
 
+async function openAddTeamMemberModal(client, triggerId) {
+    await client.views.open({
+        trigger_id: triggerId,
+        view: {
+            type: "modal",
+            callback_id: "add_team_member_form",
+            title: {
+                type: "plain_text",
+                text: "Add team member",
+            },
+            submit: {
+                type: "plain_text",
+                text: "Save",
+            },
+            close: {
+                type: "plain_text",
+                text: "Cancel",
+            },
+            blocks: [
+                {
+                    type: "input",
+                    block_id: "user",
+                    label: {
+                        type: "plain_text",
+                        text: "Select Slack user",
+                    },
+                    element: {
+                        type: "users_select",
+                        action_id: "user_id",
+                    },
+                },
+                {
+                    type: "input",
+                    block_id: "name",
+                    optional: true,
+                    label: {
+                        type: "plain_text",
+                        text: "Display name override",
+                    },
+                    element: {
+                        type: "plain_text_input",
+                        action_id: "name_value",
+                        placeholder: {
+                            type: "plain_text",
+                            text: "Leave empty to use Slack display name",
+                        },
+                    },
+                },
+            ],
+        },
+    });
+}
+
+async function openRemoveTeamMembersModal(client, triggerId) {
+    const teamMembers = await getTeamMembers();
+
+    await client.views.open({
+        trigger_id: triggerId,
+        view: {
+            type: "modal",
+            callback_id: "remove_team_members_form",
+            title: {
+                type: "plain_text",
+                text: "Remove team members",
+            },
+            submit: {
+                type: "plain_text",
+                text: "Save",
+            },
+            close: {
+                type: "plain_text",
+                text: "Cancel",
+            },
+            blocks: [
+                {
+                    type: "section",
+                    text: {
+                        type: "mrkdwn",
+                        text: teamMembers.length
+                            ? `*Active team members*\n\n${buildTeamMembersPreviewText(teamMembers)}`
+                            : "No active team members yet.",
+                    },
+                },
+                {
+                    type: "input",
+                    block_id: "users",
+                    optional: true,
+                    label: {
+                        type: "plain_text",
+                        text: "Select users to deactivate",
+                    },
+                    element: {
+                        type: "multi_users_select",
+                        action_id: "user_ids",
+                        placeholder: {
+                            type: "plain_text",
+                            text: "Choose users to remove from active team",
+                        },
+                        initial_users: [],
+                    },
+                },
+            ],
+        },
+    });
+}
+
+async function openTeamManagementPanel(client, triggerId) {
+    const teamMembers = await getTeamMembers();
+
+    await client.views.open({
+        trigger_id: triggerId,
+        view: {
+            type: "modal",
+            callback_id: "team_management_panel",
+            title: {
+                type: "plain_text",
+                text: "Team management",
+            },
+            close: {
+                type: "plain_text",
+                text: "Close",
+            },
+            blocks: [
+                {
+                    type: "section",
+                    text: {
+                        type: "mrkdwn",
+                        text: `*Active team members (${teamMembers.length})*\n\n${buildTeamMembersPreviewText(teamMembers)}`,
+                    },
+                },
+                {
+                    type: "actions",
+                    elements: [
+                        {
+                            type: "button",
+                            text: { type: "plain_text", text: "Sync workspace users" },
+                            action_id: "sync_workspace_users",
+                        },
+                        {
+                            type: "button",
+                            text: { type: "plain_text", text: "Add manually" },
+                            action_id: "open_add_team_member",
+                        },
+                        {
+                            type: "button",
+                            text: { type: "plain_text", text: "Remove users" },
+                            style: "danger",
+                            action_id: "open_remove_team_members",
+                        },
+                    ],
+                },
+            ],
+        },
+    });
+}
+
 async function openTimeOffModal(client, triggerId, initialValues = {}, metadata = {}) {
     await client.views.open({
         trigger_id: triggerId,
@@ -1288,6 +1536,83 @@ app.action("open_manager_config", async ({ ack, body, client }) => {
     }
 });
 
+app.action("open_team_management_panel", async ({ ack, body, client }) => {
+    await ack();
+
+    try {
+        const managerIds = await getManagerIds();
+        const isOwner = await isWorkspaceOwner(client, body.user.id);
+
+        if (!canUseManagerDashboard(body.user.id, managerIds, isOwner)) {
+            await notifyRequester(client, body.user.id, "Only managers can manage team members.");
+            return;
+        }
+
+        await openTeamManagementPanel(client, body.trigger_id);
+    } catch (error) {
+        console.error("Failed to open team management panel:", error);
+    }
+});
+
+app.action("sync_workspace_users", async ({ ack, body, client }) => {
+    await ack();
+
+    try {
+        const managerIds = await getManagerIds();
+        const isOwner = await isWorkspaceOwner(client, body.user.id);
+
+        if (!canUseManagerDashboard(body.user.id, managerIds, isOwner)) {
+            await notifyRequester(client, body.user.id, "Only managers can sync workspace users.");
+            return;
+        }
+
+        const syncedCount = await syncWorkspaceUsers(client);
+        await notifyRequester(client, body.user.id, `✅ Workspace sync completed. Synced ${syncedCount} user(s).`);
+        await publishHomeTab(client, body.user.id);
+    } catch (error) {
+        console.error("Failed to sync workspace users:", error);
+        await notifyRequester(client, body.user.id, "Could not sync workspace users.");
+    }
+});
+
+app.action("open_add_team_member", async ({ ack, body, client }) => {
+    await ack();
+
+    try {
+        const managerIds = await getManagerIds();
+        const isOwner = await isWorkspaceOwner(client, body.user.id);
+
+        if (!canUseManagerDashboard(body.user.id, managerIds, isOwner)) {
+            await notifyRequester(client, body.user.id, "Only managers can add team members.");
+            return;
+        }
+
+        await openAddTeamMemberModal(client, body.trigger_id);
+    } catch (error) {
+        console.error("Failed to open add team member modal:", error);
+    }
+});
+
+app.action("open_remove_team_members", async ({ ack, body, client }) => {
+    await ack();
+
+    try {
+        const managerIds = await getManagerIds();
+        const isOwner = await isWorkspaceOwner(client, body.user.id);
+
+        if (!canUseManagerDashboard(body.user.id, managerIds, isOwner)) {
+            await notifyRequester(client, body.user.id, "Only managers can remove team members.");
+            return;
+        }
+
+        await openRemoveTeamMembersModal(client, body.trigger_id);
+    } catch (error) {
+        console.error("Failed to open remove team members modal:", error);
+    }
+});
+
+
+
 app.view("manager_config_form", async ({ ack, body, view, client }) => {
     await ack();
 
@@ -1317,6 +1642,46 @@ app.view("manager_config_form", async ({ ack, body, view, client }) => {
         );
     } catch (error) {
         console.error("Failed to save manager settings:", error);
+    }
+});
+
+app.view("add_team_member_form", async ({ ack, body, view, client }) => {
+    await ack();
+
+    try {
+        const slackUserId = view.state.values.user.user_id.selected_user;
+        const manualName = (view.state.values.name.name_value.value || "").trim();
+        const employeeName = manualName || await getSlackDisplayName(client, slackUserId, slackUserId);
+
+        await upsertTeamMember(slackUserId, employeeName);
+        await notifyRequester(client, body.user.id, `✅ Added *${employeeName}* to active team members.`);
+        await publishHomeTab(client, body.user.id);
+    } catch (error) {
+        console.error("Failed to add team member:", error);
+        await notifyRequester(client, body.user.id, "Could not add team member.");
+    }
+});
+
+app.view("remove_team_members_form", async ({ ack, body, view, client }) => {
+    await ack();
+
+    try {
+        const slackUserIds = view.state.values.users.user_ids.selected_users || [];
+
+        await deactivateTeamMembers(slackUserIds);
+
+        await notifyRequester(
+            client,
+            body.user.id,
+            slackUserIds.length
+                ? `✅ Removed ${slackUserIds.length} user(s) from active team members.`
+                : "No users were selected for removal.",
+        );
+
+        await publishHomeTab(client, body.user.id);
+    } catch (error) {
+        console.error("Failed to remove team members:", error);
+        await notifyRequester(client, body.user.id, "Could not remove team members.");
     }
 });
 
