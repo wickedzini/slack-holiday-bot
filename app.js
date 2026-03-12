@@ -474,7 +474,7 @@ function buildApprovalActionBlock(requestId) {
                 type: "button",
                 text: {
                     type: "plain_text",
-                    text: "✅ Approve",
+                    text: "Approve",
                 },
                 style: "primary",
                 action_id: "approve_timeoff",
@@ -484,7 +484,7 @@ function buildApprovalActionBlock(requestId) {
                 type: "button",
                 text: {
                     type: "plain_text",
-                    text: "❌ Reject",
+                    text: "Reject",
                 },
                 style: "danger",
                 action_id: "reject_timeoff",
@@ -494,7 +494,7 @@ function buildApprovalActionBlock(requestId) {
                 type: "button",
                 text: {
                     type: "plain_text",
-                    text: "✏️ Edit",
+                    text: "Edit",
                 },
                 action_id: "manager_edit_timeoff",
                 value: requestId,
@@ -503,25 +503,19 @@ function buildApprovalActionBlock(requestId) {
     };
 }
 
-function buildRequesterEditableActionBlock(requestId, status) {
+function buildMyRequestActionBlock(requestId, status) {
     return {
         type: "actions",
         elements: [
             {
                 type: "button",
-                text: {
-                    type: "plain_text",
-                    text: "✏️ Edit",
-                },
+                text: { type: "plain_text", text: "Edit" },
                 action_id: "edit_my_timeoff",
                 value: requestId,
             },
             {
                 type: "button",
-                text: {
-                    type: "plain_text",
-                    text: status === "approved" ? "🗑️ Cancel approved" : "🗑️ Cancel request",
-                },
+                text: { type: "plain_text", text: status === "approved" ? "Cancel approved" : "Cancel request" },
                 style: "danger",
                 action_id: "cancel_timeoff",
                 value: requestId,
@@ -530,25 +524,19 @@ function buildRequesterEditableActionBlock(requestId, status) {
     };
 }
 
-function buildTeamManagementActionBlock(requestId) {
+function buildManagerUpcomingActionBlock(requestId) {
     return {
         type: "actions",
         elements: [
             {
                 type: "button",
-                text: {
-                    type: "plain_text",
-                    text: "✏️ Edit",
-                },
+                text: { type: "plain_text", text: "Edit" },
                 action_id: "manager_edit_timeoff",
                 value: requestId,
             },
             {
                 type: "button",
-                text: {
-                    type: "plain_text",
-                    text: "🗑️ Cancel",
-                },
+                text: { type: "plain_text", text: "Cancel" },
                 style: "danger",
                 action_id: "manager_cancel_timeoff",
                 value: requestId,
@@ -558,19 +546,370 @@ function buildTeamManagementActionBlock(requestId) {
 }
 
 function buildRequestDetailsText(request) {
-    const reasonText = request.reason && request.reason.trim() ? `\n📝 ${request.reason.trim()}` : "";
-    const statusPrefix = request.status === "approved"
-        ? "✅ *Approved*\n"
-        : request.status === "pending"
-            ? "🕒 *Pending*\n"
-            : request.status === "cancelled"
-                ? "🗑️ *Cancelled*\n"
-                : request.status === "rejected"
-                    ? "❌ *Rejected*\n"
-                    : "";
-
-    return `${statusPrefix}👤 *${request.employee_name}*\n📅 ${formatDateWithWeekday(request.start_date)} → ${formatDateWithWeekday(request.end_date)}\n⏳ ${buildDurationText(request.start_date, request.end_date)}${reasonText}`;
+    const reasonText = request.reason && request.reason.trim() ? `\n${request.reason.trim()}` : "";
+    return `*${request.employee_name}*\n${formatDateWithWeekday(request.start_date)} → ${formatDateWithWeekday(request.end_date)}\n${buildDurationText(request.start_date, request.end_date)}${reasonText}`;
 }
+async function openCompanyDashboardModal(client, userId) {
+    const managerIds = await getManagerIds();
+    const annualLeaveDays = await getAnnualLeaveDaysLimit();
+    const pendingRequests = await getPendingTimeOffRequests();
+    const upcomingTimeOff = await getUpcomingApprovedTimeOff();
+
+    const blocks = [
+        {
+            type: "section",
+            text: {
+                type: "mrkdwn",
+                text: `*Company Dashboard*\n\nAnnual leave allowance: *${annualLeaveDays} day(s)*\nManagers:\n${managerSummaryText(managerIds)}`,
+            },
+        },
+        {
+            type: "actions",
+            elements: [
+                {
+                    type: "button",
+                    text: { type: "plain_text", text: "Managers" },
+                    action_id: "open_manager_config",
+                },
+                {
+                    type: "button",
+                    text: { type: "plain_text", text: "Leave policy" },
+                    action_id: "open_leave_policy_config",
+                },
+                {
+                    type: "button",
+                    text: { type: "plain_text", text: "Add time off" },
+                    action_id: "manager_add_timeoff",
+                },
+                {
+                    type: "button",
+                    text: { type: "plain_text", text: "Adjust allowance" },
+                    action_id: "manager_adjust_allowance",
+                },
+            ],
+        },
+        {
+            type: "divider",
+        },
+        {
+            type: "section",
+            text: {
+                type: "mrkdwn",
+                text: `*Pending approvals*\n${pendingRequests.length} request(s) waiting for decision.`,
+            },
+        },
+        ...(pendingRequests.length === 0
+            ? [
+                {
+                    type: "section",
+                    text: {
+                        type: "mrkdwn",
+                        text: "No pending requests right now.",
+                    },
+                },
+            ]
+            : pendingRequests.flatMap((request) => [
+                {
+                    type: "section",
+                    text: {
+                        type: "mrkdwn",
+                        text: `*Pending*\n\n${buildRequestDetailsText(request)}`,
+                    },
+                },
+                buildApprovalActionBlock(request.id),
+                {
+                    type: "divider",
+                },
+            ])),
+        {
+            type: "section",
+            text: {
+                type: "mrkdwn",
+                text: "*All upcoming team requests*",
+            },
+        },
+        ...(upcomingTimeOff.length === 0
+            ? [
+                {
+                    type: "section",
+                    text: {
+                        type: "mrkdwn",
+                        text: "No upcoming approved requests right now.",
+                    },
+                },
+            ]
+            : upcomingTimeOff.flatMap((request) => [
+                {
+                    type: "section",
+                    text: {
+                        type: "mrkdwn",
+                        text: `*Approved*\n\n${buildRequestDetailsText(request)}`,
+                    },
+                },
+                buildManagerUpcomingActionBlock(request.id),
+                {
+                    type: "divider",
+                },
+            ])),
+    ];
+
+    await client.views.open({
+        trigger_id: userId,
+        view: {
+            type: "modal",
+            callback_id: "company_dashboard_modal",
+            title: {
+                type: "plain_text",
+                text: "Company Dashboard",
+            },
+            close: {
+                type: "plain_text",
+                text: "Close",
+            },
+            blocks,
+        },
+    });
+}
+app.action("open_company_dashboard", async ({ ack, body, client }) => {
+    await ack();
+
+    try {
+        const managerIds = await getManagerIds();
+        const isOwner = await isWorkspaceOwner(client, body.user.id);
+        if (!canUseManagerDashboard(body.user.id, managerIds, isOwner)) {
+            await notifyRequester(client, body.user.id, "Only managers can view the company dashboard.");
+            return;
+        }
+
+        const annualLeaveDays = await getAnnualLeaveDaysLimit();
+        const pendingRequests = await getPendingTimeOffRequests();
+        const upcomingTimeOff = await getUpcomingApprovedTimeOff();
+
+        const blocks = [
+            {
+                type: "section",
+                text: {
+                    type: "mrkdwn",
+                    text: `*Company Dashboard*\n\nAnnual leave allowance: *${annualLeaveDays} day(s)*\nManagers:\n${managerSummaryText(managerIds)}`,
+                },
+            },
+            ...(isOwner
+                ? [
+                    {
+                        type: "actions",
+                        elements: [
+                            {
+                                type: "button",
+                                text: { type: "plain_text", text: "Managers" },
+                                action_id: "open_manager_config",
+                            },
+                            {
+                                type: "button",
+                                text: { type: "plain_text", text: "Leave policy" },
+                                action_id: "open_leave_policy_config",
+                            },
+                            {
+                                type: "button",
+                                text: { type: "plain_text", text: "Add time off" },
+                                action_id: "manager_add_timeoff",
+                            },
+                            {
+                                type: "button",
+                                text: { type: "plain_text", text: "Adjust allowance" },
+                                action_id: "manager_adjust_allowance",
+                            },
+                        ],
+                    },
+                ]
+                : [
+                    {
+                        type: "actions",
+                        elements: [
+                            {
+                                type: "button",
+                                text: { type: "plain_text", text: "Add time off" },
+                                action_id: "manager_add_timeoff",
+                            },
+                            {
+                                type: "button",
+                                text: { type: "plain_text", text: "Adjust allowance" },
+                                action_id: "manager_adjust_allowance",
+                            },
+                        ],
+                    },
+                ]),
+            {
+                type: "divider",
+            },
+            {
+                type: "section",
+                text: {
+                    type: "mrkdwn",
+                    text: `*Pending approvals*\n${pendingRequests.length} request(s) waiting for decision.`,
+                },
+            },
+            ...(pendingRequests.length === 0
+                ? [
+                    {
+                        type: "section",
+                        text: {
+                            type: "mrkdwn",
+                            text: "No pending requests right now.",
+                        },
+                    },
+                ]
+                : pendingRequests.flatMap((request) => [
+                    {
+                        type: "section",
+                        text: {
+                            type: "mrkdwn",
+                            text: `*Pending*\n\n${buildRequestDetailsText(request)}`,
+                        },
+                    },
+                    buildApprovalActionBlock(request.id),
+                    {
+                        type: "divider",
+                    },
+                ])),
+            {
+                type: "section",
+                text: {
+                    type: "mrkdwn",
+                    text: "*All upcoming team requests*",
+                },
+            },
+            ...(upcomingTimeOff.length === 0
+                ? [
+                    {
+                        type: "section",
+                        text: {
+                            type: "mrkdwn",
+                            text: "No upcoming approved requests right now.",
+                        },
+                    },
+                ]
+                : upcomingTimeOff.flatMap((request) => [
+                    {
+                        type: "section",
+                        text: {
+                            type: "mrkdwn",
+                            text: `*Approved*\n\n${buildRequestDetailsText(request)}`,
+                        },
+                    },
+                    buildManagerUpcomingActionBlock(request.id),
+                    {
+                        type: "divider",
+                    },
+                ])),
+        ];
+
+        await client.views.open({
+            trigger_id: body.trigger_id,
+            view: {
+                type: "modal",
+                callback_id: "company_dashboard_modal",
+                title: {
+                    type: "plain_text",
+                    text: "Company Dashboard",
+                },
+                close: {
+                    type: "plain_text",
+                    text: "Close",
+                },
+                blocks,
+            },
+        });
+    } catch (error) {
+        console.error("Failed to open company dashboard:", error);
+    }
+});
+app.action("manager_adjust_allowance", async ({ ack, body, client }) => {
+    await ack();
+
+    try {
+        const managerIds = await getManagerIds();
+        const isOwner = await isWorkspaceOwner(client, body.user.id);
+        if (!canUseManagerDashboard(body.user.id, managerIds, isOwner)) {
+            await notifyRequester(client, body.user.id, "Only managers can adjust user allowance.");
+            return;
+        }
+
+        await client.views.open({
+            trigger_id: body.trigger_id,
+            view: {
+                type: "modal",
+                callback_id: "manager_adjust_allowance_form",
+                title: {
+                    type: "plain_text",
+                    text: "Adjust allowance",
+                },
+                submit: {
+                    type: "plain_text",
+                    text: "Save",
+                },
+                close: {
+                    type: "plain_text",
+                    text: "Cancel",
+                },
+                blocks: [
+                    {
+                        type: "input",
+                        block_id: "user",
+                        label: {
+                            type: "plain_text",
+                            text: "Employee",
+                        },
+                        element: {
+                            type: "users_select",
+                            action_id: "user_id",
+                        },
+                    },
+                    {
+                        type: "input",
+                        block_id: "days",
+                        label: {
+                            type: "plain_text",
+                            text: "Available annual leave days for current year",
+                        },
+                        element: {
+                            type: "plain_text_input",
+                            action_id: "days_value",
+                        },
+                    },
+                ],
+            },
+        });
+    } catch (error) {
+        console.error("Failed to open allowance modal:", error);
+    }
+});
+app.view("manager_adjust_allowance_form", async ({ ack, body, view, client }) => {
+    await ack();
+
+    try {
+        const slackUserId = view.state.values.user.user_id.selected_user;
+        const days = Number(view.state.values.days.days_value.value || "0");
+
+        if (!Number.isFinite(days) || days < 0) {
+            await notifyRequester(client, body.user.id, "Allowance must be zero or a positive number.");
+            return;
+        }
+
+        await setUserAnnualLeaveAllowance(slackUserId, days);
+        const employeeName = await getSlackDisplayName(client, slackUserId);
+
+        await notifyRequester(
+            client,
+            body.user.id,
+            `✅ Allowance updated for *${employeeName}* to *${days} day(s)* for the current year dashboard.`,
+        );
+
+        await publishHomeTab(client, body.user.id);
+        await publishHomeTab(client, slackUserId);
+    } catch (error) {
+        console.error("Failed to save user allowance override:", error);
+    }
+});
 
 async function notifyRequester(client, slackUserId, text, blocks = null) {
     try {
@@ -588,9 +927,7 @@ async function notifyRequester(client, slackUserId, text, blocks = null) {
 async function publishHomeTab(client, userId) {
     const managerIds = await getManagerIds();
     const isOwner = await isWorkspaceOwner(client, userId);
-    const canManageManagers = isOwner;
     const canViewManagerDashboard = canUseManagerDashboard(userId, managerIds, isOwner);
-    const annualLeaveDays = await getAnnualLeaveDaysLimit();
     const myHolidaySummary = await getMyHolidaySummary(userId);
     const upcomingTimeOff = await getUpcomingApprovedTimeOff();
     const myEditableRequests = await getEditableRequestsForUser(userId);
@@ -605,52 +942,36 @@ async function publishHomeTab(client, userId) {
                     type: "header",
                     text: {
                         type: "plain_text",
-                        text: canViewManagerDashboard ? "Holiday Planner · Dashboard" : "Holiday Planner · My Holiday",
+                        text: "Holiday Planner · My Dashboard",
                     },
                 },
                 {
                     type: "section",
                     text: {
                         type: "mrkdwn",
-                        text: `🏖️ *My Holiday*\n\n📆 Year: *${myHolidaySummary.year}*\n✅ Used: *${myHolidaySummary.usedWorkingDays} working day(s)*\n🟢 Available: *${myHolidaySummary.availableWorkingDays} working day(s)*\n📌 Annual allowance: *${annualLeaveDays} day(s)*`,
+                        text: `*My Holiday*\n\nYear: *${myHolidaySummary.year}*\nUsed: *${myHolidaySummary.usedWorkingDays} working day(s)*\nAvailable: *${myHolidaySummary.availableWorkingDays} working day(s)*\nAnnual allowance: *${myHolidaySummary.annualLeaveDays} day(s)*`,
                     },
+                    ...(canViewManagerDashboard
+                        ? {
+                            accessory: {
+                                type: "button",
+                                text: {
+                                    type: "plain_text",
+                                    text: "Company Dashboard",
+                                },
+                                action_id: "open_company_dashboard",
+                            },
+                        }
+                        : {}),
                 },
                 {
                     type: "divider",
                 },
-                ...(canViewManagerDashboard
-                    ? [
-                        {
-                            type: "actions",
-                            elements: [
-                                {
-                                    type: "button",
-                                    text: {
-                                        type: "plain_text",
-                                        text: "➕ Add time off for user",
-                                    },
-                                    action_id: "manager_add_timeoff",
-                                },
-                                {
-                                    type: "button",
-                                    text: {
-                                        type: "plain_text",
-                                        text: "🧮 Adjust user allowance",
-                                    },
-                                    action_id: "manager_adjust_allowance",
-                                },
-                            ],
-                        },
-                        {
-                            type: "divider",
-                        },
-                    ]
-                    : []),
                 {
                     type: "section",
                     text: {
                         type: "mrkdwn",
-                        text: "🧾 *Your upcoming requests*",
+                        text: "*Your upcoming requests*",
                     },
                 },
                 ...(myEditableRequests.length === 0
@@ -668,19 +989,19 @@ async function publishHomeTab(client, userId) {
                             type: "section",
                             text: {
                                 type: "mrkdwn",
-                                text: buildRequestDetailsText(request),
+                                text: `${request.status === "approved" ? "*Approved*" : "*Pending*"}\n\n${buildRequestDetailsText(request)}`,
                             },
                         },
-                        buildRequesterEditableActionBlock(request.id, request.status),
+                        buildMyRequestActionBlock(request.id, request.status),
+                        {
+                            type: "divider",
+                        },
                     ])),
-                {
-                    type: "divider",
-                },
                 {
                     type: "section",
                     text: {
                         type: "mrkdwn",
-                        text: "🌴 *Team upcoming approved time off*",
+                        text: "*Team upcoming approved time off*",
                     },
                 },
                 {
@@ -699,104 +1020,7 @@ async function publishHomeTab(client, userId) {
                         },
                     ],
                 },
-                ...(canViewManagerDashboard
-                    ? [
-                        {
-                            type: "divider",
-                        },
-                        {
-                            type: "section",
-                            text: {
-                                type: "mrkdwn",
-                                text: `⚙️ *Manager settings*\n\n📌 Annual leave allowance: *${annualLeaveDays} day(s)*\n👥 Managers:\n${managerSummaryText(managerIds)}`,
-                            },
-                            ...(canManageManagers
-                                ? {
-                                    accessory: {
-                                        type: "button",
-                                        text: {
-                                            type: "plain_text",
-                                            text: "Configure settings",
-                                        },
-                                        action_id: "open_manager_config",
-                                    },
-                                }
-                                : {}),
-                        },
-                        {
-                            type: "context",
-                            elements: [
-                                {
-                                    type: "mrkdwn",
-                                    text: canManageManagers
-                                        ? "Only workspace owners can change manager settings."
-                                        : "You can view settings, but only workspace owners can change them.",
-                                },
-                            ],
-                        },
-                        {
-                            type: "divider",
-                        },
-                        {
-                            type: "section",
-                            text: {
-                                type: "mrkdwn",
-                                text: `🕐 *Pending approvals*\n${pendingRequests.length} request(s) waiting for decision.`,
-                            },
-                        },
-                        ...(pendingRequests.length === 0
-                            ? [
-                                {
-                                    type: "section",
-                                    text: {
-                                        type: "mrkdwn",
-                                        text: "No pending requests right now.",
-                                    },
-                                },
-                            ]
-                            : pendingRequests.flatMap((request) => [
-                                {
-                                    type: "section",
-                                    text: {
-                                        type: "mrkdwn",
-                                        text: buildRequestDetailsText(request),
-                                    },
-                                },
-                                buildApprovalActionBlock(request.id),
-                            ])),
-                        {
-                            type: "divider",
-                        },
-                        {
-                            type: "section",
-                            text: {
-                                type: "mrkdwn",
-                                text: "👥 *All upcoming team requests*\nApproved upcoming requests that managers can edit or cancel.",
-                            },
-                        },
-                        ...(upcomingTimeOff.length === 0
-                            ? [
-                                {
-                                    type: "section",
-                                    text: {
-                                        type: "mrkdwn",
-                                        text: "No upcoming approved requests right now.",
-                                    },
-                                },
-                            ]
-                            : upcomingTimeOff.flatMap((request) => [
-                                {
-                                    type: "section",
-                                    text: {
-                                        type: "mrkdwn",
-                                        text: buildRequestDetailsText(request),
-                                    },
-                                },
-                                buildTeamManagementActionBlock(request.id),
-                            ])),
-                    ]
-                    : []),
-            ],
+            ]
         },
     });
 }
