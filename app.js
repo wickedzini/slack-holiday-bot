@@ -432,28 +432,18 @@ async function getApprovedRequestsForUserInYear(slackUserId, year) {
     return data || [];
 }
 
-async function getTeamMembersFromRequests() {
+async function getTeamMembers() {
     const { data, error } = await supabase
-        .from("time_off_requests")
+        .from("team_members")
         .select("slack_user_id, employee_name")
+        .eq("is_active", true)
         .order("employee_name", { ascending: true });
 
     if (error) {
         throw error;
     }
 
-    const unique = new Map();
-    for (const row of data || []) {
-        if (!row.slack_user_id) continue;
-        if (!unique.has(row.slack_user_id)) {
-            unique.set(row.slack_user_id, {
-                slack_user_id: row.slack_user_id,
-                employee_name: row.employee_name || row.slack_user_id,
-            });
-        }
-    }
-
-    return Array.from(unique.values());
+    return data || [];
 }
 
 async function getAllRequestsForUser(slackUserId) {
@@ -497,7 +487,7 @@ async function getMyHolidaySummary(slackUserId) {
 async function getTeamMemberSummaries() {
     const currentYear = new Date().getFullYear();
     const globalAnnualLeaveDays = await getAnnualLeaveDaysLimit();
-    const members = await getTeamMembersFromRequests();
+    const members = await getTeamMembers();
     const today = new Date().toISOString().slice(0, 10);
 
     const summaries = [];
