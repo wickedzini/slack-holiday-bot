@@ -13,12 +13,157 @@ const supabase = createClient(
 
 const SETTINGS_KEY = "manager_user_ids";
 
+const POLISH_MONTH_FORMAT = new Intl.DateTimeFormat("pl-PL", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    timeZone: "Europe/Warsaw",
+});
+
+function parseDateOnly(dateString) {
+    const [year, month, day] = dateString.split("-").map(Number);
+    return new Date(Date.UTC(year, month - 1, day));
+}
+
+function formatDateForStorage(date) {
+    const year = date.getUTCFullYear();
+    const month = String(date.getUTCMonth() + 1).padStart(2, "0");
+    const day = String(date.getUTCDate()).padStart(2, "0");
+    return `${year}-${month}-${day}`;
+}
+
+function addUtcDays(date, days) {
+    const next = new Date(date.getTime());
+    next.setUTCDate(next.getUTCDate() + days);
+    return next;
+}
+
+function getEasterSunday(year) {
+    const a = year % 19;
+    const b = Math.floor(year / 100);
+    const c = year % 100;
+    const d = Math.floor(b / 4);
+    const e = b % 4;
+    const f = Math.floor((b + 8) / 25);
+    const g = Math.floor((b - f + 1) / 3);
+    const h = (19 * a + b - d - g + 15) % 30;
+    const i = Math.floor(c / 4);
+    const k = c % 4;
+    const l = (32 + 2 * e + 2 * i - h - k) % 7;
+    const m = Math.floor((a + 11 * h + 22 * l) / 451);
+    const month = Math.floor((h + l - 7 * m + 114) / 31);
+    const day = ((h + l - 7 * m + 114) % 31) + 1;
+    return new Date(Date.UTC(year, month - 1, day));
+}
+
+function getPolishPublicHolidaySet(year) {
+    const easterSunday = getEasterSunday(year);
+    const easterMonday = addUtcDays(easterSunday, 1);
+    const corpusChristi = addUtcDays(easterSunday, 60);
+
+    return new Set([
+        `${year}-01-01`,
+        `${year}-01-06`,
+        `${year}-05-01`,
+        `${year}-05-03`,
+        formatDateForStorage(easterMonday),
+        formatDateForStorage(corpusChristi),
+        `${year}-08-15`,
+        `${year}-11-01`,
+        `${year}-11-11`,
+        `${year}-12-25`,
+        `${year}-12-26`,
+    ]);
+}
+
+function getPolishPublicHolidayEntries(year) {
+    const easterSunday = getEasterSunday(year);
+    const easterMonday = addUtcDays(easterSunday, 1);
+    const corpusChristi = addUtcDays(easterSunday, 60);
+
+    return [
+        { date: `${year}-01-01`, name: "Nowy Rok" },
+        { date: `${year}-01-06`, name: "Trzech Króli" },
+        { date: `${year}-05-01`, name: "Święto Pracy" },
+        { date: `${year}-05-03`, name: "Święto Konstytucji 3 Maja" },
+        { date: formatDateForStorage(easterMonday), name: "Poniedziałek Wielkanocny" },
+        { date: formatDateForStorage(corpusChristi), name: "Boże Ciało" },
+        { date: `${year}-08-15`, name: "Wniebowzięcie Najświętszej Maryi Panny" },
+        { date: `${year}-11-01`, name: "Wszystkich Świętych" },
+        { date: `${year}-11-11`, name: "Narodowe Święto Niepodległości" },
+        { date: `${year}-12-25`, name: "Boże Narodzenie (pierwszy dzień)" },
+        { date: `${year}-12-26`, name: "Boże Narodzenie (drugi dzień)" },
+    ].sort((a, b) => a.date.localeCompare(b.date));
+}
+
+function buildHolidayListText(year) {
+    const entries = getPolishPublicHolidayEntries(year);
+    const lines = entries.map((entry) => `• ${formatDate(entry.date)} — ${entry.name}`);
+    return `*Polish public holidays ${year}*\n\n${lines.join("\n")}`;
+}
+
+function calculateTimeOffStats(startDateString, endDateString) {
+    const start = parseDateOnly(startDateString);
+    const end = parseDateOnly(endDateString);
+
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end < start) {
+        return {
+            totalDays: 0,
+            workingDays: 0,
+        };
+    }
+
+    const holidaySets = new Map();
+    let totalDays = 0;
+    let workingDays = 0;
+
+    for (let current = new Date(start.getTime()); current <= end; current = addUtcDays(current, 1)) {
+        totalDays += 1;
+
+        const year = current.getUTCFullYear();
+        if (!holidaySets.has(year)) {
+            holidaySets.set(year, getPolishPublicHolidaySet(year));
+        }
+
+        const iso = formatDateForStorage(current);
+        const dayOfWeek = current.getUTCDay();
+        const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
+        const isHoliday = holidaySets.get(year).has(iso);
+
+        if (!isWeekend && !isHoliday) {
+            workingDays += 1;
+        }
+    }
+
+    return { totalDays, workingDays };
+}
+
+function buildDurationText(startDateString, endDateString) {
+    const { totalDays, workingDays } = calculateTimeOffStats(startDateString, endDateString);
+    return `${totalDays} day(s) · ${workingDays} working day(s)`;
+}
+
+async function getSlackDisplayName(client, userId, fallback = "Unknown user") {
+    try {
+        const result = await client.users.info({ user: userId });
+        const user = result.user || {};
+        const profile = user.profile || {};
+
+        return (
+            profile.display_name ||
+            profile.real_name ||
+            user.real_name ||
+            user.name ||
+            fallback
+        );
+    } catch (error) {
+        console.error("Failed to fetch Slack display name:", error);
+        return fallback;
+    }
+}
+
 function formatDate(dateString) {
-    return new Date(dateString).toLocaleDateString("pl-PL", {
-        day: "2-digit",
-        month: "2-digit",
-        year: "numeric",
-    });
+    return POLISH_MONTH_FORMAT.format(new Date(`${dateString}T12:00:00Z`));
 }
 
 function monthLabel(dateString) {
@@ -45,7 +190,7 @@ function buildUpcomingGroupedText(rows) {
     return Object.entries(grouped)
         .map(([label, items]) => {
             const lines = items.map(
-                (item) => `• *${item.employee_name}* — ${formatDate(item.start_date)} → ${formatDate(item.end_date)}`,
+                (item) => `• *${item.employee_name}* — ${formatDate(item.start_date)} → ${formatDate(item.end_date)} (${buildDurationText(item.start_date, item.end_date)})`,
             );
             return `*${label}*\n${lines.join("\n")}`;
         })
@@ -288,7 +433,7 @@ async function publishHomeTab(client, userId) {
                                     type: "section",
                                     text: {
                                         type: "mrkdwn",
-                                        text: `*${request.employee_name}*\n${formatDate(request.start_date)} → ${formatDate(request.end_date)}${request.reason && request.reason.trim() ? `\n_${request.reason.trim()}_` : ""}`,
+                                        text: `*${request.employee_name}*\n${formatDate(request.start_date)} → ${formatDate(request.end_date)}\n${buildDurationText(request.start_date, request.end_date)}${request.reason && request.reason.trim() ? `\n_${request.reason.trim()}_` : ""}`,
                                     },
                                 },
                                 buildApprovalActionBlock(request.id),
@@ -356,7 +501,7 @@ async function sendApprovalRequests(client, request) {
             type: "section",
             text: {
                 type: "mrkdwn",
-                text: `*New time off request*\n*${request.employee_name}*\n${formatDate(request.start_date)} → ${formatDate(request.end_date)}\n${request.reason || "No details provided"}`,
+                text: `*New time off request*\n*${request.employee_name}*\n${formatDate(request.start_date)} → ${formatDate(request.end_date)}\n${buildDurationText(request.start_date, request.end_date)}\n${request.reason || "No details provided"}`,
             },
         },
         {
@@ -406,6 +551,40 @@ async function notifyRequester(client, slackUserId, text) {
     } catch (error) {
         console.error("Requester notification failed:", error);
     }
+}
+
+// Helper to update approval/rejection message surface (DM, Home, etc.)
+async function updateApprovalSurface(client, body, statusLabel, data) {
+    const summaryText = `*${statusLabel}*\n*${data.employee_name}*\n${formatDate(data.start_date)} → ${formatDate(data.end_date)}\n${buildDurationText(data.start_date, data.end_date)}\n${data.reason || "No details provided"}`;
+
+    if (body.channel && body.message && body.message.ts) {
+        await client.chat.update({
+            channel: body.channel.id,
+            ts: body.message.ts,
+            text: `${statusLabel}: ${data.employee_name}`,
+            blocks: [
+                {
+                    type: "section",
+                    text: {
+                        type: "mrkdwn",
+                        text: summaryText,
+                    },
+                },
+            ],
+        });
+        return;
+    }
+
+    if (body.view && body.user && body.user.id) {
+        await publishHomeTab(client, body.user.id);
+        return;
+    }
+
+    console.warn("Unknown Slack surface for approval action.", {
+        hasChannel: Boolean(body.channel),
+        hasMessage: Boolean(body.message),
+        hasView: Boolean(body.view),
+    });
 }
 
 app.event("app_home_opened", async ({ event, client }) => {
@@ -486,6 +665,7 @@ app.command("/configure-managers", async ({ ack, body, client }) => {
     }
 });
 
+
 app.command("/timeoff", async ({ ack, body, client, respond }) => {
     await ack();
 
@@ -511,6 +691,31 @@ app.command("/timeoff", async ({ ack, body, client, respond }) => {
             response_type: "ephemeral",
             text: "Could not load upcoming time off.",
         });
+    }
+});
+
+app.command("/holidays", async ({ ack, body, respond }) => {
+    await ack();
+
+    const parsedYear = Number((body.text || "").trim());
+    const year = Number.isInteger(parsedYear) && parsedYear > 2000 ? parsedYear : new Date().getFullYear();
+
+    try {
+        await respond({
+            response_type: "ephemeral",
+            text: `Polish public holidays ${year}`,
+            blocks: [
+                {
+                    type: "section",
+                    text: {
+                        type: "mrkdwn",
+                        text: buildHolidayListText(year),
+                    },
+                },
+            ],
+        });
+    } catch (error) {
+        console.error("Failed to show holiday list:", error);
     }
 });
 
@@ -585,7 +790,7 @@ app.view("timeoff_form", async ({ ack, body, view, client }) => {
     const endDate = view.state.values.end.end_date.selected_date;
     const reason = view.state.values.reason?.reason_text?.value || "";
     const slackUserId = body.user.id;
-    const employeeName = body.user.username || body.user.id;
+    const employeeName = await getSlackDisplayName(client, slackUserId, body.user.username || body.user.id);
 
     const { data, error } = await supabase
         .from("time_off_requests")
@@ -608,7 +813,7 @@ app.view("timeoff_form", async ({ ack, body, view, client }) => {
         return;
     }
 
-    await notifyRequester(client, slackUserId, `Twój wniosek urlopowy został zapisany: ${startDate} → ${endDate}`);
+    await notifyRequester(client, slackUserId, `Twój wniosek urlopowy został zapisany: ${formatDate(startDate)} → ${formatDate(endDate)} (${buildDurationText(startDate, endDate)})`);
 
     try {
         await sendApprovalRequests(client, data);
@@ -632,27 +837,16 @@ app.action("approve_timeoff", async ({ ack, action, body, client }) => {
             throw error;
         }
 
-        await client.chat.update({
-            channel: body.channel.id,
-            ts: body.message.ts,
-            text: `Approved: ${data.employee_name}`,
-            blocks: [
-                {
-                    type: "section",
-                    text: {
-                        type: "mrkdwn",
-                        text: `*Approved*\n*${data.employee_name}*\n${formatDate(data.start_date)} → ${formatDate(data.end_date)}\n${data.reason || "No details provided"}`,
-                    },
-                },
-            ],
-        });
+        await updateApprovalSurface(client, body, "Approved", data);
 
-        await notifyRequester(client, data.slack_user_id, `Twój wniosek został zaakceptowany: ${formatDate(data.start_date)} → ${formatDate(data.end_date)}`);
+        await notifyRequester(client, data.slack_user_id, `Twój wniosek został zaakceptowany: ${formatDate(data.start_date)} → ${formatDate(data.end_date)} (${buildDurationText(data.start_date, data.end_date)})`);
 
-        try {
-            await publishHomeTab(client, body.user.id);
-        } catch (homeError) {
-            console.error("Failed to refresh manager home after approval:", homeError);
+        if (body.user && body.user.id) {
+            try {
+                await publishHomeTab(client, body.user.id);
+            } catch (homeError) {
+                console.error("Failed to refresh manager home after approval:", homeError);
+            }
         }
     } catch (error) {
         console.error("Approval failed:", error);
@@ -674,27 +868,16 @@ app.action("reject_timeoff", async ({ ack, action, body, client }) => {
             throw error;
         }
 
-        await client.chat.update({
-            channel: body.channel.id,
-            ts: body.message.ts,
-            text: `Rejected: ${data.employee_name}`,
-            blocks: [
-                {
-                    type: "section",
-                    text: {
-                        type: "mrkdwn",
-                        text: `*Rejected*\n*${data.employee_name}*\n${formatDate(data.start_date)} → ${formatDate(data.end_date)}\n${data.reason || "No details provided"}`,
-                    },
-                },
-            ],
-        });
+        await updateApprovalSurface(client, body, "Rejected", data);
 
-        await notifyRequester(client, data.slack_user_id, `Twój wniosek został odrzucony: ${formatDate(data.start_date)} → ${formatDate(data.end_date)}`);
+        await notifyRequester(client, data.slack_user_id, `Twój wniosek został odrzucony: ${formatDate(data.start_date)} → ${formatDate(data.end_date)} (${buildDurationText(data.start_date, data.end_date)})`);
 
-        try {
-            await publishHomeTab(client, body.user.id);
-        } catch (homeError) {
-            console.error("Failed to refresh manager home after rejection:", homeError);
+        if (body.user && body.user.id) {
+            try {
+                await publishHomeTab(client, body.user.id);
+            } catch (homeError) {
+                console.error("Failed to refresh manager home after rejection:", homeError);
+            }
         }
     } catch (error) {
         console.error("Rejection failed:", error);
