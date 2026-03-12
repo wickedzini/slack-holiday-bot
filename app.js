@@ -532,6 +532,14 @@ function buildTeamMembersPreviewText(teamMembers) {
     return `${preview}${extraCount}`;
 }
 
+function numberEmoji(index) {
+    const numbers = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"];
+    if (index >= 0 && index < numbers.length) {
+        return numbers[index];
+    }
+    return `${index + 1}.`;
+}
+
 async function getAllRequestsForUser(slackUserId) {
     const { data, error } = await supabase
         .from("time_off_requests")
@@ -1045,7 +1053,7 @@ async function publishHomeTab(client, userId) {
                 },
             });
         } else {
-            for (const member of teamMemberSummaries) {
+            for (const [index, member] of teamMemberSummaries.entries()) {
                 const plannedText = member.plannedRequests.length
                     ? member.plannedRequests
                         .slice(0, 5)
@@ -1065,7 +1073,7 @@ async function publishHomeTab(client, userId) {
                         type: "section",
                         text: {
                             type: "mrkdwn",
-                            text: `*${member.employee_name}*\nUsed: *${member.usedWorkingDays} working day(s)*\nAvailable: *${member.availableWorkingDays} working day(s)*\nAllowance: *${member.annualLeaveDays} day(s)*\n\n*Planned time off*\n${plannedText}\n\n*Past time off*\n${pastText}`,
+                            text: `*${numberEmoji(index)} ${member.employee_name}*\nUsed: *${member.usedWorkingDays} working day(s)*\nAvailable: *${member.availableWorkingDays} working day(s)*\nAllowance: *${member.annualLeaveDays} day(s)*\n\n*Planned time off*\n${plannedText}\n\n*Past time off*\n${pastText}`,
                         },
                     },
                     {
