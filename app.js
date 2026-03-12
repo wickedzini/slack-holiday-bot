@@ -21,6 +21,54 @@ function formatDate(dateString) {
   });
 }
 
+function monthLabel(dateString) {
+  return new Date(dateString).toLocaleDateString("en-US", {
+    month: "long",
+    year: "numeric",
+  });
+}
+
+function buildUpcomingGroupedText(rows) {
+  if (!rows.length) {
+    return "No approved upcoming time off.";
+  }
+
+  const grouped = rows.reduce((acc, row) => {
+    const label = monthLabel(row.start_date);
+    if (!acc[label]) {
+      acc[label] = [];
+    }
+    acc[label].push(row);
+    return acc;
+  }, {});
+
+  return Object.entries(grouped)
+    .map(([label, items]) => {
+      const lines = items.map(
+        (item) => `• *${item.employee_name}* — ${formatDate(item.start_date)} → ${formatDate(item.end_date)}`,
+      );
+      return `*${label}*\n${lines.join("\n")}`;
+    })
+    .join("\n\n");
+}
+
+async function getUpcomingApprovedTimeOff() {
+  const today = new Date().toISOString().slice(0, 10);
+
+  const { data, error } = await supabase
+    .from("time_off_requests")
+    .select("id, employee_name, start_date, end_date, status")
+    .eq("status", "approved")
+    .gte("end_date", today)
+    .order("start_date", { ascending: true });
+
+  if (error) {
+    throw error;
+  }
+
+  return data || [];
+}
+
 async function isWorkspaceOwner(client, userId) {
   try {
     const result = await client.users.info({ user: userId });
@@ -83,6 +131,7 @@ function managerSummaryText(managerIds) {
 async function publishHomeTab(client, userId) {
   const managerIds = await getManagerIds();
   const canManageManagers = await isWorkspaceOwner(client, userId);
+  const upcomingTimeOff = await getUpcomingApprovedTimeOff();
 
   await client.views.publish({
     user_id: userId,
@@ -130,6 +179,32 @@ async function publishHomeTab(client, userId) {
               text: canManageManagers
                 ? "Only workspace owners can manage approvers."
                 : "You can view the manager list, but only workspace owners can change it.",
+            },
+          ],
+        },
+        {
+          type: "divider",
+        },
+        {
+          type: "section",
+          text: {
+            type: "mrkdwn",
+            text: "*Upcoming approved time off*",
+          },
+        },
+        {
+          type: "section",
+          text: {
+            type: "mrkdwn",
+            text: buildUpcomingGroupedText(upcomingTimeOff),
+          },
+        },
+        {
+          type: "context",
+          elements: [
+            {
+              type: "mrkdwn",
+              text: "Use `/timeoff` in any channel to post the upcoming time off list there.",
             },
           ],
         },
@@ -312,6 +387,34 @@ app.command("/configure-managers", async ({ ack, body, client }) => {
   }
 });
 
+app.command("/timeoff", async ({ ack, body, client, respond }) => {
+  await ack();
+
+  try {
+    const upcomingTimeOff = await getUpcomingApprovedTimeOff();
+
+    await client.chat.postMessage({
+      channel: body.channel_id,
+      text: "Upcoming approved time off",
+      blocks: [
+        {
+          type: "section",
+          text: {
+            type: "mrkdwn",
+            text: `*Upcoming approved time off*\n\n${buildUpcomingGroupedText(upcomingTimeOff)}`,
+          },
+        },
+      ],
+    });
+  } catch (error) {
+    console.error("Failed to post upcoming time off:", error);
+    await respond({
+      response_type: "ephemeral",
+      text: "Could not load upcoming time off.",
+    });
+  }
+});
+
 app.command("/new-timeoff", async ({ ack, body, client }) => {
   await ack();
 
@@ -364,6 +467,7 @@ app.command("/new-timeoff", async ({ ack, body, client }) => {
             type: "plain_text",
             text: "Reason / details",
           },
+          optional: true,
           element: {
             type: "plain_text_input",
             action_id: "reason_text",
@@ -380,7 +484,7 @@ app.view("timeoff_form", async ({ ack, body, view, client }) => {
 
   const startDate = view.state.values.start.start_date.selected_date;
   const endDate = view.state.values.end.end_date.selected_date;
-  const reason = view.state.values.reason.reason_text.value || "";
+  const reason = view.state.values.reason?.reason_text?.value || "";
   const slackUserId = body.user.id;
   const employeeName = body.user.username || body.user.id;
 
@@ -459,6 +563,16 @@ app.action("approve_timeoff", async ({ ack, action, body, client }) => {
         },
       ],
     });
+
+    try {
+      const dm = await client.conversations.open({ users: data.slack_user_id });
+      await client.chat.postMessage({
+        channel: dm.channel.id,
+        text: `Twój wniosek został zaakceptowany: ${formatDate(data.start_date)} → ${formatDate(data.end_date)}`,
+      });
+    } catch (notifyError) {
+      console.error("Failed to notify requester about approval:", notifyError);
+    }
   } catch (error) {
     console.error("Approval failed:", error);
   }
@@ -493,6 +607,16 @@ app.action("reject_timeoff", async ({ ack, action, body, client }) => {
         },
       ],
     });
+
+    try {
+      const dm = await client.conversations.open({ users: data.slack_user_id });
+      await client.chat.postMessage({
+        channel: dm.channel.id,
+        text: `Twój wniosek został odrzucony: ${formatDate(data.start_date)} → ${formatDate(data.end_date)}`,
+      });
+    } catch (notifyError) {
+      console.error("Failed to notify requester about rejection:", notifyError);
+    }
   } catch (error) {
     console.error("Rejection failed:", error);
   }
