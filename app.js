@@ -20,6 +20,11 @@ const POLISH_MONTH_FORMAT = new Intl.DateTimeFormat("pl-PL", {
     timeZone: "Europe/Warsaw",
 });
 
+const POLISH_WEEKDAY_FORMAT = new Intl.DateTimeFormat("pl-PL", {
+    weekday: "long",
+    timeZone: "Europe/Warsaw",
+});
+
 function parseDateOnly(dateString) {
     const [year, month, day] = dateString.split("-").map(Number);
     return new Date(Date.UTC(year, month - 1, day));
@@ -98,7 +103,8 @@ function getPolishPublicHolidayEntries(year) {
 
 function buildHolidayListText(year) {
     const entries = getPolishPublicHolidayEntries(year);
-    const lines = entries.map((entry) => `• ${formatDate(entry.date)} — ${entry.name}`);
+
+    const lines = entries.map((entry) => `• ${formatDateWithWeekday(entry.date)} — ${entry.name}`);
     return `*Polish public holidays ${year}*\n\n${lines.join("\n")}`;
 }
 
@@ -166,6 +172,20 @@ function formatDate(dateString) {
     return POLISH_MONTH_FORMAT.format(new Date(`${dateString}T12:00:00Z`));
 }
 
+function capitalizeFirstLetter(value) {
+    if (!value) {
+        return value;
+    }
+    return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+function formatDateWithWeekday(dateString) {
+    const date = new Date(`${dateString}T12:00:00Z`);
+    const formattedDate = formatDate(dateString);
+    const weekday = capitalizeFirstLetter(POLISH_WEEKDAY_FORMAT.format(date));
+    return `${formattedDate} (${weekday})`;
+}
+
 function monthLabel(dateString) {
     return new Date(dateString).toLocaleDateString("en-US", {
         month: "long",
@@ -189,8 +209,9 @@ function buildUpcomingGroupedText(rows) {
 
     return Object.entries(grouped)
         .map(([label, items]) => {
+
             const lines = items.map(
-                (item) => `• *${item.employee_name}* — ${formatDate(item.start_date)} → ${formatDate(item.end_date)} (${buildDurationText(item.start_date, item.end_date)})`,
+                (item) => `• *${item.employee_name}* — ${formatDateWithWeekday(item.start_date)} → ${formatDateWithWeekday(item.end_date)} (${buildDurationText(item.start_date, item.end_date)})`,
             );
             return `*${label}*\n${lines.join("\n")}`;
         })
@@ -433,7 +454,7 @@ async function publishHomeTab(client, userId) {
                                     type: "section",
                                     text: {
                                         type: "mrkdwn",
-                                        text: `*${request.employee_name}*\n${formatDate(request.start_date)} → ${formatDate(request.end_date)}\n${buildDurationText(request.start_date, request.end_date)}${request.reason && request.reason.trim() ? `\n_${request.reason.trim()}_` : ""}`,
+                                        text: `*${request.employee_name}*\n${formatDateWithWeekday(request.start_date)} → ${formatDateWithWeekday(request.end_date)}\n${buildDurationText(request.start_date, request.end_date)}${request.reason && request.reason.trim() ? `\n_${request.reason.trim()}_` : ""}`,
                                     },
                                 },
                                 buildApprovalActionBlock(request.id),
@@ -501,7 +522,7 @@ async function sendApprovalRequests(client, request) {
             type: "section",
             text: {
                 type: "mrkdwn",
-                text: `*New time off request*\n*${request.employee_name}*\n${formatDate(request.start_date)} → ${formatDate(request.end_date)}\n${buildDurationText(request.start_date, request.end_date)}\n${request.reason || "No details provided"}`,
+                text: `*New time off request*\n*${request.employee_name}*\n${formatDateWithWeekday(request.start_date)} → ${formatDateWithWeekday(request.end_date)}\n${buildDurationText(request.start_date, request.end_date)}\n${request.reason || "No details provided"}`,
             },
         },
         {
@@ -555,7 +576,7 @@ async function notifyRequester(client, slackUserId, text) {
 
 // Helper to update approval/rejection message surface (DM, Home, etc.)
 async function updateApprovalSurface(client, body, statusLabel, data) {
-    const summaryText = `*${statusLabel}*\n*${data.employee_name}*\n${formatDate(data.start_date)} → ${formatDate(data.end_date)}\n${buildDurationText(data.start_date, data.end_date)}\n${data.reason || "No details provided"}`;
+    const summaryText = `*${statusLabel}*\n*${data.employee_name}*\n${formatDateWithWeekday(data.start_date)} → ${formatDateWithWeekday(data.end_date)}\n${buildDurationText(data.start_date, data.end_date)}\n${data.reason || "No details provided"}`;
 
     if (body.channel && body.message && body.message.ts) {
         await client.chat.update({
@@ -813,7 +834,8 @@ app.view("timeoff_form", async ({ ack, body, view, client }) => {
         return;
     }
 
-    await notifyRequester(client, slackUserId, `Twój wniosek urlopowy został zapisany: ${formatDate(startDate)} → ${formatDate(endDate)} (${buildDurationText(startDate, endDate)})`);
+
+    await notifyRequester(client, slackUserId, `Twój wniosek urlopowy został zapisany: ${formatDateWithWeekday(startDate)} → ${formatDateWithWeekday(endDate)} (${buildDurationText(startDate, endDate)})`);
 
     try {
         await sendApprovalRequests(client, data);
@@ -839,7 +861,7 @@ app.action("approve_timeoff", async ({ ack, action, body, client }) => {
 
         await updateApprovalSurface(client, body, "Approved", data);
 
-        await notifyRequester(client, data.slack_user_id, `Twój wniosek został zaakceptowany: ${formatDate(data.start_date)} → ${formatDate(data.end_date)} (${buildDurationText(data.start_date, data.end_date)})`);
+        await notifyRequester(client, data.slack_user_id, `Twój wniosek został zaakceptowany: ${formatDateWithWeekday(data.start_date)} → ${formatDateWithWeekday(data.end_date)} (${buildDurationText(data.start_date, data.end_date)})`);
 
         if (body.user && body.user.id) {
             try {
@@ -870,7 +892,7 @@ app.action("reject_timeoff", async ({ ack, action, body, client }) => {
 
         await updateApprovalSurface(client, body, "Rejected", data);
 
-        await notifyRequester(client, data.slack_user_id, `Twój wniosek został odrzucony: ${formatDate(data.start_date)} → ${formatDate(data.end_date)} (${buildDurationText(data.start_date, data.end_date)})`);
+        await notifyRequester(client, data.slack_user_id, `Twój wniosek został odrzucony: ${formatDateWithWeekday(data.start_date)} → ${formatDateWithWeekday(data.end_date)} (${buildDurationText(data.start_date, data.end_date)})`);
 
         if (body.user && body.user.id) {
             try {
