@@ -1002,7 +1002,7 @@ async function publishHomeTab(client, userId) {
                 type: "section",
                 text: {
                     type: "mrkdwn",
-                    text: `*Pending approvals*\n${pendingRequests.length} request(s) waiting for decision.`,
+                    text: `⏳ *Pending approvals*\n${pendingRequests.length} request(s) waiting for decision.`,
                 },
             },
         );
@@ -1158,31 +1158,6 @@ async function publishHomeTab(client, userId) {
             },
         );
 
-        if (myEditableRequests.length === 0) {
-            blocks.push({
-                type: "section",
-                text: {
-                    type: "mrkdwn",
-                    text: "No upcoming requests to edit right now.",
-                },
-            });
-        } else {
-            for (const request of myEditableRequests) {
-                blocks.push(
-                    {
-                        type: "section",
-                        text: {
-                            type: "mrkdwn",
-                            text: buildRequestDetailsText(request),
-                        },
-                    },
-                    buildMyRequestActionBlock(request.id, request.status),
-                    {
-                        type: "divider",
-                    },
-                );
-            }
-        }
 
 
 
@@ -1216,15 +1191,7 @@ async function publishHomeTab(client, userId) {
             type: "section",
             text: {
                 type: "mrkdwn",
-                text: "🌴 *Upcoming holidays*",
-            },
-        });
-
-        blocks.push({
-            type: "section",
-            text: {
-                type: "mrkdwn",
-                text: `✅ *Approved*\n${myApprovedRequests.length} approved request(s).`,
+                text: `🌴 *Upcoming holidays*\n${myApprovedRequests.length} approved request(s).`,
             },
         });
 
@@ -1233,7 +1200,7 @@ async function publishHomeTab(client, userId) {
                 type: "section",
                 text: {
                     type: "mrkdwn",
-                    text: "No approved requests right now.",
+                    text: "No upcoming approved holidays right now.",
                 },
             });
         } else {
@@ -2259,6 +2226,10 @@ app.action("approve_timeoff", async ({ ack, action, body, client }) => {
     await ack();
 
     try {
+        if (body.user && body.user.id) {
+            await notifyRequester(client, body.user.id, "⏳ Approving request...");
+        }
+
         const { data, error } = await supabase
             .from("time_off_requests")
             .update({ status: "approved" })
@@ -2270,19 +2241,21 @@ app.action("approve_timeoff", async ({ ack, action, body, client }) => {
             throw error;
         }
 
-        await updateApprovalSurface(client, body, "Approved", data);
-        await notifyRequester(
-            client,
-            data.slack_user_id,
-            buildSimpleStatusMessage("✅", "Your request was approved.", data.start_date, data.end_date, data.reason),
-        );
-
-        if (body.user && body.user.id) {
-            await publishHomeTab(client, body.user.id);
-        }
-        await publishHomeTab(client, data.slack_user_id);
+        await Promise.all([
+            updateApprovalSurface(client, body, "Approved", data),
+            notifyRequester(
+                client,
+                data.slack_user_id,
+                buildSimpleStatusMessage("✅", "Your request was approved.", data.start_date, data.end_date, data.reason),
+            ),
+            body.user && body.user.id ? publishHomeTab(client, body.user.id) : Promise.resolve(),
+            publishHomeTab(client, data.slack_user_id),
+        ]);
     } catch (error) {
         console.error("Approval failed:", error);
+        if (body.user && body.user.id) {
+            await notifyRequester(client, body.user.id, "Could not approve the request.");
+        }
     }
 });
 
@@ -2290,6 +2263,10 @@ app.action("reject_timeoff", async ({ ack, action, body, client }) => {
     await ack();
 
     try {
+        if (body.user && body.user.id) {
+            await notifyRequester(client, body.user.id, "⏳ Rejecting request...");
+        }
+
         const { data, error } = await supabase
             .from("time_off_requests")
             .update({ status: "rejected" })
@@ -2301,19 +2278,21 @@ app.action("reject_timeoff", async ({ ack, action, body, client }) => {
             throw error;
         }
 
-        await updateApprovalSurface(client, body, "Rejected", data);
-        await notifyRequester(
-            client,
-            data.slack_user_id,
-            buildSimpleStatusMessage("❌", "Your request was rejected.", data.start_date, data.end_date, data.reason),
-        );
-
-        if (body.user && body.user.id) {
-            await publishHomeTab(client, body.user.id);
-        }
-        await publishHomeTab(client, data.slack_user_id);
+        await Promise.all([
+            updateApprovalSurface(client, body, "Rejected", data),
+            notifyRequester(
+                client,
+                data.slack_user_id,
+                buildSimpleStatusMessage("❌", "Your request was rejected.", data.start_date, data.end_date, data.reason),
+            ),
+            body.user && body.user.id ? publishHomeTab(client, body.user.id) : Promise.resolve(),
+            publishHomeTab(client, data.slack_user_id),
+        ]);
     } catch (error) {
         console.error("Rejection failed:", error);
+        if (body.user && body.user.id) {
+            await notifyRequester(client, body.user.id, "Could not reject the request.");
+        }
     }
 });
 
