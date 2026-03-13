@@ -1084,12 +1084,15 @@ async function publishHomeTab(client, userId) {
         }
 
     } else {
+        const myPendingRequests = myEditableRequests.filter((request) => request.status === "pending");
+        const myApprovedRequests = myEditableRequests.filter((request) => request.status === "approved");
+
         blocks.push(
             {
                 type: "section",
                 text: {
                     type: "mrkdwn",
-                    text: `*My Holiday*\n\nYear: *${myHolidaySummary.year}*\nUsed: *${myHolidaySummary.usedWorkingDays} working day(s)*\nAvailable: *${myHolidaySummary.availableWorkingDays} working day(s)*\nAnnual allowance: *${myHolidaySummary.annualLeaveDays} day(s)*`,
+                    text: `📅 *My Holiday*\n\nYear: *${myHolidaySummary.year}*\nUsed: *${myHolidaySummary.usedWorkingDays} working day(s)*\nAvailable: *${myHolidaySummary.availableWorkingDays} working day(s)*\nAnnual allowance: *${myHolidaySummary.annualLeaveDays} day(s)*`,
                 },
             },
             {
@@ -1099,7 +1102,7 @@ async function publishHomeTab(client, userId) {
                 type: "section",
                 text: {
                     type: "mrkdwn",
-                    text: "*Your upcoming requests*",
+                    text: "🌴 *Upcoming holidays*",
                 },
             },
         );
@@ -1119,7 +1122,75 @@ async function publishHomeTab(client, userId) {
                         type: "section",
                         text: {
                             type: "mrkdwn",
-                            text: `${request.status === "approved" ? "*Approved*" : "*Pending*"}\n\n${buildRequestDetailsText(request)}`,
+                            text: buildRequestDetailsText(request),
+                        },
+                    },
+                    buildMyRequestActionBlock(request.id, request.status),
+                    {
+                        type: "divider",
+                    },
+                );
+            }
+        }
+
+        blocks.push({
+            type: "section",
+            text: {
+                type: "mrkdwn",
+                text: `⏳ *Pending*\n${myPendingRequests.length} request(s) currently waiting for decision.`,
+            },
+        });
+
+        if (myPendingRequests.length === 0) {
+            blocks.push({
+                type: "section",
+                text: {
+                    type: "mrkdwn",
+                    text: "No pending requests right now.",
+                },
+            });
+        } else {
+            for (const request of myPendingRequests) {
+                blocks.push(
+                    {
+                        type: "section",
+                        text: {
+                            type: "mrkdwn",
+                            text: buildRequestDetailsText(request),
+                        },
+                    },
+                    buildMyRequestActionBlock(request.id, request.status),
+                    {
+                        type: "divider",
+                    },
+                );
+            }
+        }
+
+        blocks.push({
+            type: "section",
+            text: {
+                type: "mrkdwn",
+                text: `✅ *Approved*\n${myApprovedRequests.length} approved request(s).`,
+            },
+        });
+
+        if (myApprovedRequests.length === 0) {
+            blocks.push({
+                type: "section",
+                text: {
+                    type: "mrkdwn",
+                    text: "No approved requests right now.",
+                },
+            });
+        } else {
+            for (const request of myApprovedRequests) {
+                blocks.push(
+                    {
+                        type: "section",
+                        text: {
+                            type: "mrkdwn",
+                            text: buildRequestDetailsText(request),
                         },
                     },
                     buildMyRequestActionBlock(request.id, request.status),
@@ -1135,7 +1206,7 @@ async function publishHomeTab(client, userId) {
                 type: "section",
                 text: {
                     type: "mrkdwn",
-                    text: "*Team upcoming approved time off*",
+                    text: "👥 *Team upcoming approved time off*",
                 },
             },
             {
