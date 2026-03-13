@@ -177,6 +177,16 @@ async function getTeamMembers() {
         .order("employee_name", { ascending: true });
 
     if (error) {
+        // Fallback if avatar_url column doesn't exist yet
+        if (error.code === "42703") {
+            const fallback = await supabase
+                .from("team_members")
+                .select("slack_user_id, employee_name")
+                .eq("is_active", true)
+                .order("employee_name", { ascending: true });
+            if (fallback.error) throw fallback.error;
+            return (fallback.data || []).map((m) => ({ ...m, avatar_url: null }));
+        }
         throw error;
     }
 
@@ -353,18 +363,27 @@ function renderHtml() {
     .day.today { border: 2px solid var(--blue); box-shadow: inset 0 0 0 1px rgba(62,99,221,0.18); }
     .timeline-card { padding: 12px; background: #FFFFFF; border: 1px solid var(--border); border-radius: var(--radius-lg); margin-bottom: 12px; }
     .timeline-wrap { overflow-x: auto; overflow-y: hidden; }
-    .timeline-grid { display: grid; gap: 0; min-width: 980px; border-top: 1px solid rgba(7,27,82,0.08); border-left: 1px solid rgba(7,27,82,0.08); }
-    .timeline-head, .timeline-person, .timeline-cell { min-height: 44px; border-right: 1px solid rgba(7,27,82,0.08); border-bottom: 1px solid rgba(7,27,82,0.08); background: #FFFFFF; }
-    .timeline-head { display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 800; color: var(--muted); }
+    .timeline-grid { display: grid; gap: 0; border-top: 1px solid rgba(7,27,82,0.08); border-left: 1px solid rgba(7,27,82,0.08); }
+    .timeline-head, .timeline-person, .timeline-cell { min-height: 40px; border-right: 1px solid rgba(7,27,82,0.08); border-bottom: 1px solid rgba(7,27,82,0.08); background: #FFFFFF; }
+    .timeline-head { display: flex; flex-direction: column; align-items: center; justify-content: center; font-size: 10px; font-weight: 800; color: var(--muted); height: 40px; }
     .timeline-head.today { background: #EEF2FF; color: var(--blue); }
-    .timeline-person { display: flex; align-items: center; gap: 10px; padding: 0 10px; position: sticky; left: 0; z-index: 2; }
+    .timeline-head.weekend { background: #F7F8FC; }
+    .timeline-person { display: flex; align-items: center; gap: 10px; padding: 0 10px; position: sticky; left: 0; z-index: 2; background: #FFFFFF; }
     .avatar { width: 28px; height: 28px; border-radius: 999px; display: inline-flex; align-items: center; justify-content: center; color: white; font-size: 11px; font-weight: 900; flex: none; }
     .avatar-img { width: 28px; height: 28px; border-radius: 999px; object-fit: cover; flex: none; display: block; }
     .person-name { font-size: 12px; font-weight: 800; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .timeline-cell { position: relative; background: #FFFFFF; }
     .timeline-cell.leave { background: rgba(62,99,221,0.10); }
-    .timeline-cell.leave::after { content: ""; position: absolute; left: 4px; right: 4px; top: 50%; height: 14px; transform: translateY(-50%); border-radius: 999px; background: rgba(62,99,221,0.22); }
+    .timeline-cell.leave::after { content: ""; position: absolute; left: 3px; right: 3px; top: 50%; height: 14px; transform: translateY(-50%); border-radius: 999px; background: rgba(62,99,221,0.28); }
     .timeline-cell.today { box-shadow: inset 2px 0 0 var(--blue), inset -2px 0 0 var(--blue); }
+    .timeline-cell.weekend { background: #F7F8FC; }
+    .timeline-cell.weekend.leave { background: rgba(62,99,221,0.10); }
+    .timeline-head.month-start, .timeline-cell.month-start { border-left: 2px solid rgba(62,99,221,0.35); }
+    .timeline-month-corner { border-right: 1px solid rgba(7,27,82,0.08); border-bottom: 1px solid rgba(7,27,82,0.08); background: var(--panel-soft); position: sticky; left: 0; z-index: 3; height: 24px; }
+    .timeline-month-header { display: flex; align-items: center; padding: 0 6px; font-size: 9px; font-weight: 900; color: var(--blue); background: var(--panel-soft); border-right: 2px solid rgba(62,99,221,0.35); border-bottom: 1px solid rgba(7,27,82,0.08); text-transform: uppercase; letter-spacing: 0.06em; height: 24px; white-space: nowrap; overflow: hidden; }
+    .tl-dow { font-size: 7px; font-weight: 900; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); line-height: 1; margin-bottom: 1px; }
+    .tl-day { font-size: 10px; font-weight: 800; line-height: 1; }
+    .timeline-head.today .tl-dow, .timeline-head.today .tl-day { color: var(--blue); }
     .weekday { padding: 2px 4px; font-size: 8px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); font-weight: 900; }
     .day { min-height: 58px; background: rgba(255,255,255,0.9); border: 1px solid rgba(7,27,82,0.05); border-radius: 9px; padding: 5px; display: flex; flex-direction: column; gap: 3px; }
     .day.empty { opacity: 0.35; background: rgba(255,255,255,0.45); }
@@ -409,8 +428,10 @@ function renderHtml() {
       <div class="card toolbar-card"><div class="toolbar-label">Actions</div><div class="toolbar-controls"><button class="btn" id="resetFilters">Reset filters</button></div></div>
     </section>
     <section class="timeline-card">
-      <h2 class="section-title">Team Timeline</h2>
-      <p class="section-subtitle">Days on the X axis, team members on the Y axis</p>
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:4px;gap:12px">
+        <div><h2 class="section-title">Team Timeline</h2><p class="section-subtitle" style="margin-bottom:0">Full year · scroll horizontally · month separators</p></div>
+        <button class="btn" id="jumpToday" type="button" style="font-size:12px;padding:7px 12px;flex:none">Jump to Today</button>
+      </div>
       <div class="timeline-wrap"><div id="timelineGrid"></div></div>
     </section>
     <section class="section-grid">
@@ -606,38 +627,87 @@ function renderHtml() {
       }).join("");
     }
 
+    function jumpToToday() {
+      var wrap = document.querySelector(".timeline-wrap");
+      var el = document.getElementById("timeline-today");
+      if (!wrap || !el) return;
+      var wrapRect = wrap.getBoundingClientRect();
+      var elRect = el.getBoundingClientRect();
+      var target = wrap.scrollLeft + elRect.left - wrapRect.left - wrapRect.width / 2 + elRect.width / 2;
+      wrap.scrollTo({ left: Math.max(0, target), behavior: "smooth" });
+    }
+
     function renderTimeline() {
       var container = document.getElementById("timelineGrid");
       var members = getFilteredMembers();
-      if (!state.selectedMonth) {
-        container.innerHTML = '<div class="empty-state">Choose a month to see the team timeline.</div>';
-        return;
-      }
-      var start = monthStartFromLabel(state.selectedMonth);
-      var month = start.getUTCMonth();
-      var year = start.getUTCFullYear();
-      var lastDay = new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
+      if (!state.data) return;
+      var year = state.data.currentYear;
       var todayIso = new Date().toISOString().slice(0, 10);
-      container.className = "timeline-grid";
-      container.style.gridTemplateColumns = "180px repeat(" + lastDay + ", minmax(28px, 1fr))";
-      var cells = [];
-      cells.push('<div class="timeline-person"><strong>Team</strong></div>');
-      for (var day = 1; day <= lastDay; day += 1) {
-        var iso = new Date(Date.UTC(year, month, day)).toISOString().slice(0, 10);
-        cells.push('<div class="timeline-head ' + (iso === todayIso ? "today" : "") + '">' + day + '</div>');
+      var dowNames = ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"];
+
+      // Build all months + days for the full year
+      var monthsData = [];
+      var totalDays = 0;
+      for (var m = 0; m < 12; m += 1) {
+        var daysInMonth = new Date(Date.UTC(year, m + 1, 0)).getUTCDate();
+        var monthName = new Date(Date.UTC(year, m, 1)).toLocaleDateString("en-US", { month: "short", timeZone: "Europe/Warsaw" });
+        var days = [];
+        for (var d = 1; d <= daysInMonth; d += 1) {
+          var dateObj = new Date(Date.UTC(year, m, d));
+          var iso = year + "-" + String(m + 1).padStart(2, "0") + "-" + String(d).padStart(2, "0");
+          days.push({ iso: iso, day: d, dow: dateObj.getUTCDay() });
+          totalDays += 1;
+        }
+        monthsData.push({ name: monthName, days: days });
       }
+
+      container.className = "timeline-grid";
+      container.style.gridTemplateColumns = "180px repeat(" + totalDays + ", 26px)";
+
+      var cells = [];
+
+      // Row 1 – month labels (spanning)
+      cells.push('<div class="timeline-month-corner"></div>');
+      monthsData.forEach(function (month) {
+        cells.push('<div class="timeline-month-header" style="grid-column:span ' + month.days.length + '">' + month.name + '</div>');
+      });
+
+      // Row 2 – "Team" label + day/weekday headers
+      cells.push('<div class="timeline-person" style="height:40px"><strong style="font-size:11px">Team</strong></div>');
+      monthsData.forEach(function (month, mi) {
+        month.days.forEach(function (d, di) {
+          var isWeekend = d.dow === 0 || d.dow === 6;
+          var isToday = d.iso === todayIso;
+          var isMonthStart = mi > 0 && di === 0;
+          var cls = "timeline-head" + (isToday ? " today" : "") + (isWeekend ? " weekend" : "") + (isMonthStart ? " month-start" : "");
+          cells.push(
+            '<div class="' + cls + '"' + (isToday ? ' id="timeline-today"' : '') + '>' +
+            '<span class="tl-dow">' + dowNames[d.dow] + '</span>' +
+            '<span class="tl-day">' + d.day + '</span>' +
+            '</div>'
+          );
+        });
+      });
+
+      // Member rows
       members.forEach(function (member) {
-        var initials = member.employee_name.split(/\s+/).map(function (part) { return part[0] || ""; }).join("").slice(0, 2).toUpperCase();
+        var initials = member.employee_name.split(/\s+/).map(function (p) { return p[0] || ""; }).join("").slice(0, 2).toUpperCase();
         var avatarHtml = member.avatar_url
           ? '<img src="' + member.avatar_url + '" class="avatar-img" alt="' + member.employee_name + '">'
           : '<span class="avatar" style="background:' + member.color + '">' + initials + '</span>';
         cells.push('<div class="timeline-person">' + avatarHtml + '<span class="person-name">' + member.employee_name + '</span></div>');
-        for (var day = 1; day <= lastDay; day += 1) {
-          var iso = new Date(Date.UTC(year, month, day)).toISOString().slice(0, 10);
-          var onLeave = member.requests.some(function (req) { return iso >= req.start_date && iso <= req.end_date; });
-          cells.push('<div class="timeline-cell ' + (onLeave ? "leave " : "") + (iso === todayIso ? "today" : "") + '" title="' + member.employee_name + ' \u00b7 ' + iso + '"></div>');
-        }
+        monthsData.forEach(function (month, mi) {
+          month.days.forEach(function (d, di) {
+            var onLeave = member.requests.some(function (req) { return d.iso >= req.start_date && d.iso <= req.end_date; });
+            var isWeekend = d.dow === 0 || d.dow === 6;
+            var isToday = d.iso === todayIso;
+            var isMonthStart = mi > 0 && di === 0;
+            var cls = "timeline-cell" + (onLeave ? " leave" : "") + (isToday ? " today" : "") + (isWeekend ? " weekend" : "") + (isMonthStart ? " month-start" : "");
+            cells.push('<div class="' + cls + '" title="' + member.employee_name + ' \u00b7 ' + d.iso + '"></div>');
+          });
+        });
       });
+
       container.innerHTML = cells.join("");
     }
 
@@ -674,7 +744,9 @@ function renderHtml() {
       var currentMonthLabel = new Date(Date.UTC(now.getFullYear(), now.getMonth(), 1)).toLocaleDateString("en-US", { month: "long", year: "numeric", timeZone: "Europe/Warsaw" });
       state.selectedMonth = months.includes(currentMonthLabel) ? currentMonthLabel : (months[0] || null);
       document.getElementById("resetFilters").addEventListener("click", function () { state.selectedMembers = new Set(); renderAll(); });
+      document.getElementById("jumpToday").addEventListener("click", jumpToToday);
       renderAll();
+      window.requestAnimationFrame(jumpToToday);
     }
 
     boot().catch(function (error) {
