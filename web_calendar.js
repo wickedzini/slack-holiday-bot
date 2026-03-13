@@ -169,6 +169,39 @@ async function getUserAnnualLeaveAllowance(slackUserId, year) {
     return data ? Number(data.annual_days) : null;
 }
 
+// In-memory cache so we don't hammer Slack on every page load
+const avatarCache = new Map();
+
+async function fetchSlackAvatarUrl(slackUserId) {
+    if (avatarCache.has(slackUserId)) return avatarCache.get(slackUserId);
+    const token = process.env.SLACK_BOT_TOKEN;
+    if (!token) {
+        console.log(`[avatar] SLACK_BOT_TOKEN not set — skipping Slack fetch for ${slackUserId}`);
+        return null;
+    }
+    try {
+        console.log(`[avatar] Fetching from Slack API for user ${slackUserId}`);
+        const res = await fetch(
+            `https://slack.com/api/users.info?user=${encodeURIComponent(slackUserId)}`,
+            { headers: { Authorization: `Bearer ${token}` } },
+        );
+        const json = await res.json();
+        if (!json.ok) {
+            console.log(`[avatar] Slack API error for ${slackUserId}: ${json.error}`);
+            avatarCache.set(slackUserId, null);
+            return null;
+        }
+        const url = json.user?.profile?.image_48 || json.user?.profile?.image_72 || null;
+        console.log(`[avatar] ${slackUserId} → ${url ? url : "no image found in profile"}`);
+        avatarCache.set(slackUserId, url);
+        return url;
+    } catch (err) {
+        console.log(`[avatar] Exception fetching avatar for ${slackUserId}: ${err.message}`);
+        avatarCache.set(slackUserId, null);
+        return null;
+    }
+}
+
 async function getTeamMembers() {
     const { data, error } = await supabase
         .from("team_members")
@@ -190,7 +223,20 @@ async function getTeamMembers() {
         throw error;
     }
 
-    return data || [];
+    const members = data || [];
+    // Fill missing avatar_urls live from Slack API (cached per process lifetime)
+    if (process.env.SLACK_BOT_TOKEN) {
+        const missing = members.filter((m) => !m.avatar_url);
+        console.log(`[avatar] ${members.length} members total, ${missing.length} missing avatar_url in DB`);
+        await Promise.all(
+            missing.map(async (m) => {
+                m.avatar_url = await fetchSlackAvatarUrl(m.slack_user_id);
+            }),
+        );
+    } else {
+        console.log("[avatar] SLACK_BOT_TOKEN not set — avatars will fall back to initials");
+    }
+    return members;
 }
 
 async function getApprovedRequests() {
@@ -327,33 +373,32 @@ function renderHtml() {
 
     /* ── Timeline table (table = reliable sticky columns) ── */
     .timeline-wrap { overflow-x: auto; overflow-y: visible; }
+    /* table-layout: fixed + <colgroup> = correct column widths regardless of row structure */
     .tl-table { border-collapse: collapse; table-layout: fixed; border-top: 1px solid #EBEBEB; border-left: 1px solid #EBEBEB; }
     .tl-table th, .tl-table td { padding: 0; border-right: 1px solid #EBEBEB; border-bottom: 1px solid #EBEBEB; }
-    /* sticky name column – works reliably in <table> */
-    .tl-name { width: 180px; position: sticky; left: 0; z-index: 2; background: #fff; }
-    .tl-month-corner { background: #F8F8F8 !important; height: 20px; z-index: 3 !important; }
-    .tl-month-th { background: #F8F8F8; height: 20px; font-size: 9px; font-weight: 700; color: #999; text-transform: uppercase; letter-spacing: 0.07em; padding: 0 6px !important; white-space: nowrap; overflow: hidden; text-align: left; vertical-align: middle; }
+    .tl-name { position: sticky; left: 0; z-index: 2; background: #fff; }
+    .tl-month-corner { background: #F8F8F8 !important; height: 22px; z-index: 3 !important; }
+    .tl-month-th { background: #F8F8F8; height: 22px; font-size: 9px; font-weight: 700; color: #999; text-transform: uppercase; letter-spacing: 0.07em; padding: 0 8px !important; white-space: nowrap; overflow: hidden; text-align: left; vertical-align: middle; }
     .tl-month-sep { border-right: 1px solid #D0D0D0 !important; }
-    .tl-day-col { width: 26px; }
-    .tl-day-th { height: 36px; text-align: center; vertical-align: middle; }
+    .tl-day-th { height: 40px; text-align: center; vertical-align: middle; }
     .tl-day-th.weekend { background: #FAFAFA; }
     .tl-day-th.today { background: #EEF3FF; }
     .tl-day-th.today .tl-dow { color: #2563EB; opacity: 0.6; }
     .tl-day-th.today .tl-day { color: #2563EB; font-weight: 800; }
     .tl-day-th.month-start { border-left: 1px solid #D0D0D0 !important; }
-    .tl-dow { display: block; font-size: 7px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: #ccc; line-height: 1; }
-    .tl-day { display: block; font-size: 10px; font-weight: 600; color: #aaa; line-height: 1.4; }
-    .tl-name-inner { display: flex; align-items: center; gap: 8px; padding: 0 10px; height: 36px; }
-    .tl-team-label { height: 36px; vertical-align: middle; }
-    .tl-cell { height: 36px; position: relative; }
+    .tl-dow { display: block; font-size: 8px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: #ccc; line-height: 1; }
+    .tl-day { display: block; font-size: 11px; font-weight: 600; color: #aaa; line-height: 1.5; }
+    .tl-name-inner { display: flex; align-items: center; gap: 8px; padding: 0 12px; height: 40px; }
+    .tl-team-label { height: 40px; vertical-align: middle; }
+    .tl-cell { height: 40px; position: relative; }
     .tl-cell.weekend { background: #FAFAFA; }
     .tl-cell.leave { background: #EEF3FF; }
-    .tl-cell.leave::after { content: ""; position: absolute; left: 2px; right: 2px; top: 50%; height: 10px; transform: translateY(-50%); border-radius: 999px; background: #BFCFFA; }
+    .tl-cell.leave::after { content: ""; position: absolute; left: 3px; right: 3px; top: 50%; height: 12px; transform: translateY(-50%); border-radius: 999px; background: #BFCFFA; }
     .tl-cell.today { box-shadow: inset 2px 0 0 #2563EB, inset -2px 0 0 #2563EB; }
     .tl-cell.month-start { border-left: 1px solid #D0D0D0 !important; }
-    .av { width: 22px; height: 22px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; color: #fff; font-size: 8px; font-weight: 800; flex: none; }
-    .av-img { width: 22px; height: 22px; border-radius: 50%; object-fit: cover; flex: none; display: block; }
-    .pname { font-size: 11px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #222; }
+    .av { width: 24px; height: 24px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; color: #fff; font-size: 8px; font-weight: 800; flex: none; }
+    .av-img { width: 24px; height: 24px; border-radius: 50%; object-fit: cover; flex: none; display: block; }
+    .pname { font-size: 12px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #222; }
 
     /* ── Stats ── */
     .stats-row { display: grid; grid-template-columns: repeat(5, 1fr); }
@@ -364,13 +409,11 @@ function renderHtml() {
     .stat-desc { font-size: 11px; color: #bbb; margin-top: 3px; font-weight: 500; }
 
     /* ── Events grouped by month ── */
-    .evt-group { border-bottom: 1px solid #F0F0F0; }
-    .evt-group:last-child { border-bottom: 0; }
-    .evt-month-label { padding: 12px 20px 8px; font-size: 11px; font-weight: 700; color: #999; text-transform: uppercase; letter-spacing: 0.07em; display: flex; align-items: center; gap: 8px; }
-    .evt-count { background: #F0F0F0; border-radius: 999px; padding: 1px 7px; font-size: 10px; font-weight: 700; color: #888; }
+    .evt-count { background: #F0F0F0; border-radius: 999px; padding: 1px 7px; font-size: 10px; font-weight: 700; color: #888; margin-left: 4px; }
     table.evt-table { width: 100%; border-collapse: collapse; }
-    table.evt-table thead th { text-align: left; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.07em; color: #ccc; padding: 0 20px 8px; }
+    table.evt-table thead th { text-align: left; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.07em; color: #ccc; padding: 12px 20px 10px; border-bottom: 1px solid #F0F0F0; }
     table.evt-table tbody td { padding: 10px 20px; border-top: 1px solid #F7F7F7; font-size: 13px; font-weight: 500; color: #333; }
+    table.evt-table .evt-month-row td { background: #FAFAFA; padding: 6px 20px; font-size: 10px; font-weight: 700; color: #999; text-transform: uppercase; letter-spacing: 0.07em; border-top: 1px solid #EBEBEB; }
     .empty { padding: 32px 20px; text-align: center; color: #bbb; font-size: 13px; }
 
     /* ── People balances ── */
@@ -442,6 +485,11 @@ function renderHtml() {
       return state.data.members.filter(function (m) { return state.selectedMembers.has(m.slack_user_id); });
     }
 
+    function fmtDate(iso) {
+      var p = iso.split("-");
+      return p[2] + "." + p[1] + "." + p[0];
+    }
+
     function avatarHtml(member, cls) {
       var initials = member.employee_name.split(/\s+/).map(function (p) { return p[0] || ""; }).join("").slice(0, 2).toUpperCase();
       return member.avatar_url
@@ -501,6 +549,7 @@ function renderHtml() {
       var dowNames = ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"];
 
       var monthsData = [];
+      var totalDays = 0;
       for (var m = 0; m < 12; m += 1) {
         var daysInMonth = new Date(Date.UTC(year, m + 1, 0)).getUTCDate();
         var monthName = new Date(Date.UTC(year, m, 1)).toLocaleDateString("en-US", { month: "short", timeZone: "Europe/Warsaw" });
@@ -509,12 +558,19 @@ function renderHtml() {
           var dateObj = new Date(Date.UTC(year, m, d));
           var iso = year + "-" + String(m + 1).padStart(2, "0") + "-" + String(d).padStart(2, "0");
           days.push({ iso: iso, day: d, dow: dateObj.getUTCDay() });
+          totalDays += 1;
         }
         monthsData.push({ name: monthName, days: days });
       }
 
-      // Build as <table> — sticky first column is reliable in tables across all browsers
-      var html = '<table class="tl-table">';
+      // Build as <table> — sticky first column is reliable in tables across all browsers.
+      // <colgroup> is required so table-layout:fixed actually uses our widths
+      // (widths on cells in row 2+ are ignored in fixed layout; row 1 uses colspan so no individual widths).
+      var COL_W = 50; // px per day — table-layout:fixed needs explicit table width to not shrink
+      var NAME_W = 190;
+      var tableW = NAME_W + totalDays * COL_W;
+      var html = '<table class="tl-table" style="width:' + tableW + 'px">';
+      html += '<colgroup><col style="width:' + NAME_W + 'px"><col span="' + totalDays + '" style="width:' + COL_W + 'px"></colgroup>';
 
       // Row 1: month labels with colspan
       html += '<thead><tr>';
@@ -570,7 +626,6 @@ function renderHtml() {
         container.innerHTML = '<div class="empty">No approved leave for the selected filters.</div>';
         return;
       }
-      // Group by YYYY-MM, preserving order
       var groups = {};
       var order = [];
       events.forEach(function (e) {
@@ -579,22 +634,23 @@ function renderHtml() {
         groups[key].push(e);
       });
       var todayKey = new Date().toISOString().slice(0, 7);
-      container.innerHTML = order.map(function (key) {
+      // Single table — header once at top, month separator rows between groups
+      var html = '<table class="evt-table"><thead><tr><th>Employee</th><th>Dates</th><th>Days (working)</th><th>Reason</th></tr></thead><tbody>';
+      order.forEach(function (key) {
         var grp = groups[key];
         var label = key === todayKey
           ? "This month"
           : new Date(key + "-01T12:00:00Z").toLocaleDateString("en-US", { month: "long", year: "numeric", timeZone: "Europe/Warsaw" });
-        return '<div class="evt-group">' +
-          '<div class="evt-month-label">' + label + ' <span class="evt-count">' + grp.length + '</span></div>' +
-          '<table class="evt-table"><thead><tr><th>Employee</th><th>Dates</th><th>Working days</th><th>Reason</th></tr></thead><tbody>' +
-          grp.map(function (e) {
-            return '<tr><td><strong style="color:#111;font-weight:700">' + e.employeeName + '</strong></td>' +
-              '<td>' + e.start + ' \u2192 ' + e.end + '</td>' +
-              '<td>' + e.workingDays + '</td>' +
-              '<td style="color:#bbb">' + (e.reason || '\u2014') + '</td></tr>';
-          }).join("") +
-          '</tbody></table></div>';
-      }).join("");
+        html += '<tr class="evt-month-row"><td colspan="4">' + label + '<span class="evt-count">' + grp.length + '</span></td></tr>';
+        grp.forEach(function (e) {
+          html += '<tr><td><strong style="color:#111;font-weight:700">' + e.employeeName + '</strong></td>' +
+            '<td>' + fmtDate(e.start) + ' \u2192 ' + fmtDate(e.end) + '</td>' +
+            '<td>' + e.totalDays + ' (' + e.workingDays + ')</td>' +
+            '<td style="color:#bbb">' + (e.reason || '\u2014') + '</td></tr>';
+        });
+      });
+      html += '</tbody></table>';
+      container.innerHTML = html;
     }
 
     function renderPeopleSection() {
