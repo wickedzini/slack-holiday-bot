@@ -452,18 +452,20 @@ async function getTeamMembers() {
     return data || [];
 }
 
-async function upsertTeamMember(slackUserId, employeeName) {
+async function upsertTeamMember(slackUserId, employeeName, avatarUrl = null) {
+    const payload = {
+        slack_user_id: slackUserId,
+        employee_name: employeeName,
+        is_active: true,
+        updated_at: new Date().toISOString(),
+    };
+    if (avatarUrl) {
+        payload.avatar_url = avatarUrl;
+    }
+
     const { error } = await supabase
         .from("team_members")
-        .upsert(
-            {
-                slack_user_id: slackUserId,
-                employee_name: employeeName,
-                is_active: true,
-                updated_at: new Date().toISOString(),
-            },
-            { onConflict: "slack_user_id" },
-        );
+        .upsert(payload, { onConflict: "slack_user_id" });
 
     if (error) {
         throw error;
@@ -508,8 +510,9 @@ async function syncWorkspaceUsers(client) {
                 member.real_name ||
                 member.name ||
                 member.id;
+            const avatarUrl = profile.image_48 || profile.image_72 || null;
 
-            await upsertTeamMember(member.id, employeeName);
+            await upsertTeamMember(member.id, employeeName, avatarUrl);
             synced += 1;
         }
 
@@ -1255,7 +1258,28 @@ async function publishHomeTab(client, userId) {
         }
 
         blocks.push(...buildLeaveListSection("Currently on Leave", currentlyOnLeave, "Nobody is currently on leave."));
-        blocks.push(...buildLeaveListSection("Next 5 Leaves", nextFiveLeaves, "No upcoming approved leaves."));
+
+        blocks.push({
+            type: "header",
+            text: { type: "plain_text", text: "Next 5 Leaves" },
+        });
+        if (nextFiveLeaves.length === 0) {
+            blocks.push({
+                type: "section",
+                text: { type: "mrkdwn", text: "No upcoming approved leaves." },
+            });
+        } else {
+            for (const request of nextFiveLeaves) {
+                blocks.push(
+                    {
+                        type: "section",
+                        text: { type: "mrkdwn", text: buildCompactLeaveText(request, { includeReason: true }) },
+                    },
+                    buildManagerUpcomingActionBlock(request.id),
+                    { type: "divider" },
+                );
+            }
+        }
     } else {
         const myPendingRequests = myEditableRequests.filter((request) => request.status === "pending");
         const myApprovedRequests = myEditableRequests.filter((request) => request.status === "approved");
@@ -2099,10 +2123,54 @@ app.action("manager_cancel_timeoff", async ({ ack, action, body, client }) => {
         }
 
         const request = await getTimeOffRequestById(action.value);
+
+        await client.views.open({
+            trigger_id: body.trigger_id,
+            view: {
+                type: "modal",
+                callback_id: "manager_cancel_confirm_form",
+                private_metadata: request.id,
+                title: { type: "plain_text", text: "Cancel leave" },
+                submit: { type: "plain_text", text: "Yes, cancel" },
+                close: { type: "plain_text", text: "Go back" },
+                blocks: [
+                    {
+                        type: "section",
+                        text: {
+                            type: "mrkdwn",
+                            text: `Are you sure you want to cancel this leave?\n\n${buildRequestDetailsText(request)}`,
+                        },
+                    },
+                    {
+                        type: "input",
+                        optional: true,
+                        block_id: "comment",
+                        label: { type: "plain_text", text: "Comment for the employee (optional)" },
+                        element: {
+                            type: "plain_text_input",
+                            multiline: true,
+                            action_id: "comment_value",
+                        },
+                    },
+                ],
+            },
+        });
+    } catch (error) {
+        console.error("Failed to open manager cancel confirm modal:", error);
+    }
+});
+
+app.view("manager_cancel_confirm_form", async ({ ack, body, view, client }) => {
+    await ack();
+
+    try {
+        const requestId = view.private_metadata;
+        const comment = view.state.values.comment?.comment_value?.value || "";
+
         const { data, error } = await supabase
             .from("time_off_requests")
             .update({ status: "cancelled" })
-            .eq("id", request.id)
+            .eq("id", requestId)
             .select()
             .single();
 
@@ -2110,14 +2178,14 @@ app.action("manager_cancel_timeoff", async ({ ack, action, body, client }) => {
             throw error;
         }
 
-        await notifyRequester(
-            client,
-            data.slack_user_id,
-            buildSimpleStatusMessage("🗑️", "Your request was cancelled by a manager.", data.start_date, data.end_date, data.reason),
-        );
+        const message = buildSimpleStatusMessage("🗑️", "Your request was cancelled by a manager.", data.start_date, data.end_date, data.reason) +
+            (comment && comment.trim() ? `\n\nManager comment\n${comment.trim()}` : "");
 
-        await publishHomeTab(client, body.user.id);
-        await publishHomeTab(client, data.slack_user_id);
+        await Promise.all([
+            notifyRequester(client, data.slack_user_id, message),
+            publishHomeTab(client, body.user.id),
+            publishHomeTab(client, data.slack_user_id),
+        ]);
     } catch (error) {
         console.error("Failed to cancel team time off:", error);
     }

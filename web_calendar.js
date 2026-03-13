@@ -172,7 +172,7 @@ async function getUserAnnualLeaveAllowance(slackUserId, year) {
 async function getTeamMembers() {
     const { data, error } = await supabase
         .from("team_members")
-        .select("slack_user_id, employee_name")
+        .select("slack_user_id, employee_name, avatar_url")
         .eq("is_active", true)
         .order("employee_name", { ascending: true });
 
@@ -239,6 +239,7 @@ async function buildDashboardData() {
         memberSummaries.push({
             slack_user_id: member.slack_user_id,
             employee_name: member.employee_name,
+            avatar_url: member.avatar_url || null,
             allowance: annualLeaveDays,
             used: usedWorkingDays,
             available: Math.max(annualLeaveDays - usedWorkingDays, 0),
@@ -358,6 +359,7 @@ function renderHtml() {
     .timeline-head.today { background: #EEF2FF; color: var(--blue); }
     .timeline-person { display: flex; align-items: center; gap: 10px; padding: 0 10px; position: sticky; left: 0; z-index: 2; }
     .avatar { width: 28px; height: 28px; border-radius: 999px; display: inline-flex; align-items: center; justify-content: center; color: white; font-size: 11px; font-weight: 900; flex: none; }
+    .avatar-img { width: 28px; height: 28px; border-radius: 999px; object-fit: cover; flex: none; display: block; }
     .person-name { font-size: 12px; font-weight: 800; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .timeline-cell { position: relative; background: #FFFFFF; }
     .timeline-cell.leave { background: rgba(62,99,221,0.10); }
@@ -406,6 +408,11 @@ function renderHtml() {
       <div class="card toolbar-card"><div class="toolbar-label">Filter people</div><div class="chip-row" id="memberChips"></div></div>
       <div class="card toolbar-card"><div class="toolbar-label">Actions</div><div class="toolbar-controls"><button class="btn" id="resetFilters">Reset filters</button></div></div>
     </section>
+    <section class="timeline-card">
+      <h2 class="section-title">Team Timeline</h2>
+      <p class="section-subtitle">Days on the X axis, team members on the Y axis</p>
+      <div class="timeline-wrap"><div id="timelineGrid"></div></div>
+    </section>
     <section class="section-grid">
       <div class="card calendar-card">
         <div class="calendar-head">
@@ -424,11 +431,6 @@ function renderHtml() {
       </div>
     </section>
     <section class="overview-grid" id="overviewCards"></section>
-    <section class="timeline-card">
-      <h2 class="section-title">Team Timeline</h2>
-      <p class="section-subtitle">Days on the X axis, team members on the Y axis</p>
-      <div class="timeline-wrap"><div id="timelineGrid"></div></div>
-    </section>
     <section class="card table-card">
       <h2 class="section-title">All approved time off</h2>
       <p class="section-subtitle">Complete list with filters applied</p>
@@ -586,10 +588,14 @@ function renderHtml() {
         return;
       }
       container.innerHTML = members.map(function (member, index) {
+        var initials = member.employee_name.split(/\s+/).map(function (part) { return part[0] || ""; }).join("").slice(0, 2).toUpperCase();
+        var avatarHtml = member.avatar_url
+          ? '<img src="' + member.avatar_url + '" class="avatar-img" alt="' + member.employee_name + '" style="margin-right:8px">'
+          : '<span class="avatar" style="background:' + member.color + ';margin-right:8px">' + initials + '</span>';
         return '<div class="member-card">' +
           '<div class="member-head">' +
-            '<div><h3 class="member-name">' + (index + 1) + '. ' + member.employee_name + '</h3>' +
-            '<div class="member-role">' + member.requestCount + ' approved request(s)</div></div>' +
+            '<div style="display:flex;align-items:center;gap:8px;min-width:0">' + avatarHtml + '<div style="min-width:0"><h3 class="member-name">' + (index + 1) + '. ' + member.employee_name + '</h3>' +
+            '<div class="member-role">' + member.requestCount + ' approved request(s)</div></div></div>' +
             '<span class="badge">' + member.allowance + ' allowance</span>' +
           '</div>' +
           '<div class="mini-stats">' +
@@ -622,7 +628,10 @@ function renderHtml() {
       }
       members.forEach(function (member) {
         var initials = member.employee_name.split(/\s+/).map(function (part) { return part[0] || ""; }).join("").slice(0, 2).toUpperCase();
-        cells.push('<div class="timeline-person"><span class="avatar" style="background:' + member.color + '">' + initials + '</span><span class="person-name">' + member.employee_name + '</span></div>');
+        var avatarHtml = member.avatar_url
+          ? '<img src="' + member.avatar_url + '" class="avatar-img" alt="' + member.employee_name + '">'
+          : '<span class="avatar" style="background:' + member.color + '">' + initials + '</span>';
+        cells.push('<div class="timeline-person">' + avatarHtml + '<span class="person-name">' + member.employee_name + '</span></div>');
         for (var day = 1; day <= lastDay; day += 1) {
           var iso = new Date(Date.UTC(year, month, day)).toISOString().slice(0, 10);
           var onLeave = member.requests.some(function (req) { return iso >= req.start_date && iso <= req.end_date; });
