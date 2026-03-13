@@ -178,8 +178,13 @@ function buildDurationText(startDateString, endDateString) {
 }
 
 function buildReadableStatusMessage(emoji, title, employeeName, startDate, endDate, reason = "") {
-    const reasonLine = reason && reason.trim() ? `\n📝 ${reason.trim()}` : "";
-    return `${emoji} *${title}*\n\n👤 *${employeeName}*\n📅 ${formatDateWithWeekday(startDate)} → ${formatDateWithWeekday(endDate)}\n⏳ ${buildDurationText(startDate, endDate)}${reasonLine}`;
+    const reasonLine = reason && reason.trim() ? `\n\nDetails\n${reason.trim()}` : "";
+    return `${emoji} *${title}*\n\n${employeeName}\n${formatDateWithWeekday(startDate)} → ${formatDateWithWeekday(endDate)}\n${buildDurationText(startDate, endDate)}${reasonLine}`;
+}
+
+function buildSimpleStatusMessage(emoji, title, startDate, endDate, reason = "") {
+    const reasonLine = reason && reason.trim() ? `\n\nDetails\n${reason.trim()}` : "";
+    return `${emoji} *${title}*\n\n${formatDateWithWeekday(startDate)} → ${formatDateWithWeekday(endDate)}\n${buildDurationText(startDate, endDate)}${reasonLine}`;
 }
 
 function clipRequestToYear(startDateString, endDateString, year) {
@@ -730,6 +735,32 @@ function buildRequestDetailsText(request) {
     const reasonText = request.reason && request.reason.trim() ? `\n${request.reason.trim()}` : "";
     return `*${request.employee_name}*\n${formatDateWithWeekday(request.start_date)} → ${formatDateWithWeekday(request.end_date)}\n${buildDurationText(request.start_date, request.end_date)}${reasonText}`;
 }
+
+function buildManagerPendingRequestSection(request, memberSummary, currentYear) {
+    return {
+        type: "section",
+        fields: [
+            {
+                type: "mrkdwn",
+                text:
+                    `*Who?*\n${request.employee_name} <@${request.slack_user_id}>` +
+                    `\n\n*Start Date*\n${formatDateWithWeekday(request.start_date)}` +
+                    `\n\n*Used vacation (in ${currentYear})*\n${memberSummary
+                        ? `${memberSummary.usedWorkingDays} used • ${memberSummary.availableWorkingDays} left (out of ${memberSummary.annualLeaveDays})`
+                        : "No allowance summary yet."
+                    }`,
+            },
+            {
+                type: "mrkdwn",
+                text:
+                    `*What?*\n🌴 ${request.reason && request.reason.trim() ? request.reason.trim() : "Vacation"
+                    } (${buildDurationText(request.start_date, request.end_date)})` +
+                    `\n\n*End Date*\n${formatDateWithWeekday(request.end_date)}`,
+            },
+        ],
+    };
+}
+
 app.action("switch_to_user_dashboard", async ({ ack, body, client }) => {
     await ack();
 
@@ -868,13 +899,23 @@ async function publishHomeTab(client, userId) {
         ? HOME_VIEW_MANAGER
         : HOME_VIEW_USER;
 
-    const myHolidaySummary = await getMyHolidaySummary(userId);
-    const upcomingTimeOff = await getUpcomingApprovedTimeOff();
-    const myEditableRequests = await getEditableRequestsForUser(userId);
-    const pendingRequests = canViewManagerDashboard ? await getPendingTimeOffRequests() : [];
-    const annualLeaveDays = await getAnnualLeaveDaysLimit();
-    const teamMemberSummaries = canViewManagerDashboard ? await getTeamMemberSummaries() : [];
-    const activeTeamMembers = canViewManagerDashboard ? await getTeamMembers() : [];
+    const [
+        myHolidaySummary,
+        upcomingTimeOff,
+        myEditableRequests,
+        annualLeaveDays,
+        pendingRequests,
+        teamMemberSummaries,
+        activeTeamMembers,
+    ] = await Promise.all([
+        getMyHolidaySummary(userId),
+        getUpcomingApprovedTimeOff(),
+        getEditableRequestsForUser(userId),
+        getAnnualLeaveDaysLimit(),
+        canViewManagerDashboard ? getPendingTimeOffRequests() : Promise.resolve([]),
+        canViewManagerDashboard ? getTeamMemberSummaries() : Promise.resolve([]),
+        canViewManagerDashboard ? getTeamMembers() : Promise.resolve([]),
+    ]);
 
     const blocks = [
         {
@@ -975,15 +1016,16 @@ async function publishHomeTab(client, userId) {
                 },
             });
         } else {
+            const currentYear = new Date().getFullYear();
+            const teamSummaryMap = new Map(
+                teamMemberSummaries.map((member) => [member.slack_user_id, member]),
+            );
             for (const request of pendingRequests) {
+
+                const memberSummary = teamSummaryMap.get(request.slack_user_id);
+
                 blocks.push(
-                    {
-                        type: "section",
-                        text: {
-                            type: "mrkdwn",
-                            text: `*Pending*\n\n${buildRequestDetailsText(request)}`,
-                        },
-                    },
+                    buildManagerPendingRequestSection(request, memberSummary, currentYear),
                     buildApprovalActionBlock(request.id),
                     {
                         type: "divider",
@@ -993,10 +1035,10 @@ async function publishHomeTab(client, userId) {
         }
 
         blocks.push({
-            type: "section",
+            type: "header",
             text: {
-                type: "mrkdwn",
-                text: "*All upcoming team requests*",
+                type: "plain_text",
+                text: "🌴 Upcoming team holidays",
             },
         });
 
@@ -1036,11 +1078,20 @@ async function publishHomeTab(client, userId) {
                 type: "divider",
             },
             {
-                type: "section",
+                type: "header",
                 text: {
-                    type: "mrkdwn",
-                    text: "*Team members overview*",
+                    type: "plain_text",
+                    text: "👥 Team Members Overview",
                 },
+            },
+            {
+                type: "context",
+                elements: [
+                    {
+                        type: "mrkdwn",
+                        text: "Used, available allowance, planned time off and past approved time off for each team member.",
+                    },
+                ],
             },
         );
 
@@ -1102,7 +1153,7 @@ async function publishHomeTab(client, userId) {
                 type: "section",
                 text: {
                     type: "mrkdwn",
-                    text: "🌴 *Upcoming holidays*",
+                    text: `⏳ *Pending*\n${myPendingRequests.length} request(s) currently waiting for decision.`,
                 },
             },
         );
@@ -1133,13 +1184,7 @@ async function publishHomeTab(client, userId) {
             }
         }
 
-        blocks.push({
-            type: "section",
-            text: {
-                type: "mrkdwn",
-                text: `⏳ *Pending*\n${myPendingRequests.length} request(s) currently waiting for decision.`,
-            },
-        });
+
 
         if (myPendingRequests.length === 0) {
             blocks.push({
@@ -1166,6 +1211,14 @@ async function publishHomeTab(client, userId) {
                 );
             }
         }
+
+        blocks.push({
+            type: "section",
+            text: {
+                type: "mrkdwn",
+                text: "🌴 *Upcoming holidays*",
+            },
+        });
 
         blocks.push({
             type: "section",
@@ -1932,7 +1985,7 @@ app.action("cancel_timeoff", async ({ ack, action, body, client }) => {
         await notifyRequester(
             client,
             body.user.id,
-            `🗑️ Your request was cancelled.\n\n📅 ${formatDateWithWeekday(data.start_date)} → ${formatDateWithWeekday(data.end_date)}\n⏳ ${buildDurationText(data.start_date, data.end_date)}`,
+            buildSimpleStatusMessage("🗑️", "Your request was cancelled.", data.start_date, data.end_date, data.reason),
         );
 
         await publishHomeTab(client, body.user.id);
@@ -1967,7 +2020,7 @@ app.action("manager_cancel_timeoff", async ({ ack, action, body, client }) => {
         await notifyRequester(
             client,
             data.slack_user_id,
-            `🗑️ Your request was cancelled by a manager.\n\n📅 ${formatDateWithWeekday(data.start_date)} → ${formatDateWithWeekday(data.end_date)}\n⏳ ${buildDurationText(data.start_date, data.end_date)}${data.reason ? `\n📝 ${data.reason}` : ""}`,
+            buildSimpleStatusMessage("🗑️", "Your request was cancelled by a manager.", data.start_date, data.end_date, data.reason),
         );
 
         await publishHomeTab(client, body.user.id);
@@ -2101,20 +2154,20 @@ app.view("timeoff_form", async ({ ack, body, view, client }) => {
                 await notifyRequester(
                     client,
                     existingRequest.slack_user_id,
-                    `✏️ Your request was updated by a manager.\n\n📅 ${formatDateWithWeekday(startDate)} → ${formatDateWithWeekday(endDate)}\n⏳ ${buildDurationText(startDate, endDate)}${reason ? `\n📝 ${reason}` : ""}`,
+                    buildSimpleStatusMessage("✏️", "Your request was updated by a manager.", startDate, endDate, reason),
                 );
                 await notifyRequester(
                     client,
                     slackUserId,
-                    `✏️ Team request updated.\n\n👤 ${data.employee_name}\n📅 ${formatDateWithWeekday(startDate)} → ${formatDateWithWeekday(endDate)}\n⏳ ${buildDurationText(startDate, endDate)}${reason ? `\n📝 ${reason}` : ""}`,
+                    buildReadableStatusMessage("✏️", "Team request updated.", data.employee_name, startDate, endDate, reason),
                 );
             } else {
                 await notifyRequester(
                     client,
                     slackUserId,
                     existingRequest.status === "approved"
-                        ? `✏️ Your approved request was updated and moved back to pending approval.\n\n📅 ${formatDateWithWeekday(startDate)} → ${formatDateWithWeekday(endDate)}\n⏳ ${buildDurationText(startDate, endDate)}${reason ? `\n📝 ${reason}` : ""}`
-                        : `✏️ Your request was updated.\n\n📅 ${formatDateWithWeekday(startDate)} → ${formatDateWithWeekday(endDate)}\n⏳ ${buildDurationText(startDate, endDate)}${reason ? `\n📝 ${reason}` : ""}`,
+                        ? buildSimpleStatusMessage("✏️", "Your approved request was updated and moved back to pending approval.", startDate, endDate, reason)
+                        : buildSimpleStatusMessage("✏️", "Your request was updated.", startDate, endDate, reason),
                 );
             }
 
@@ -2149,7 +2202,7 @@ app.view("timeoff_form", async ({ ack, body, view, client }) => {
         await notifyRequester(
             client,
             slackUserId,
-            `📝 Your time off request was saved.\n\n📅 ${formatDateWithWeekday(startDate)} → ${formatDateWithWeekday(endDate)}\n⏳ ${buildDurationText(startDate, endDate)}${reason ? `\n📝 ${reason}` : ""}`,
+            buildSimpleStatusMessage("📝", "Your time off request was saved.", startDate, endDate, reason),
         );
 
         await sendApprovalRequests(client, data);
@@ -2191,7 +2244,7 @@ app.view("manager_add_timeoff_form", async ({ ack, body, view, client }) => {
         await notifyRequester(
             client,
             slackUserId,
-            `📅 Time off added by manager.\n\n${buildReadableStatusMessage("📅", "Time off recorded", employeeName, startDate, endDate, reason)}`
+            buildReadableStatusMessage("📅", "Time off added by manager.", employeeName, startDate, endDate, reason),
         );
 
         await publishHomeTab(client, body.user.id);
@@ -2221,7 +2274,7 @@ app.action("approve_timeoff", async ({ ack, action, body, client }) => {
         await notifyRequester(
             client,
             data.slack_user_id,
-            `✅ Your request was approved.\n\n📅 ${formatDateWithWeekday(data.start_date)} → ${formatDateWithWeekday(data.end_date)}\n⏳ ${buildDurationText(data.start_date, data.end_date)}${data.reason ? `\n📝 ${data.reason}` : ""}`,
+            buildSimpleStatusMessage("✅", "Your request was approved.", data.start_date, data.end_date, data.reason),
         );
 
         if (body.user && body.user.id) {
@@ -2252,7 +2305,7 @@ app.action("reject_timeoff", async ({ ack, action, body, client }) => {
         await notifyRequester(
             client,
             data.slack_user_id,
-            `❌ Your request was rejected.\n\n📅 ${formatDateWithWeekday(data.start_date)} → ${formatDateWithWeekday(data.end_date)}\n⏳ ${buildDurationText(data.start_date, data.end_date)}${data.reason ? `\n📝 ${data.reason}` : ""}`,
+            buildSimpleStatusMessage("❌", "Your request was rejected.", data.start_date, data.end_date, data.reason),
         );
 
         if (body.user && body.user.id) {
