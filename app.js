@@ -15,6 +15,7 @@ const MANAGER_IDS_KEY = "manager_user_ids";
 const ANNUAL_LEAVE_DAYS_KEY = "annual_leave_days";
 const DEFAULT_ANNUAL_LEAVE_DAYS = 26;
 const USER_ALLOWANCE_OVERRIDE_TABLE = "user_leave_allowances";
+const WEB_CALENDAR_URL = process.env.WEB_CALENDAR_URL || null;
 
 const HOME_VIEW_KEY_PREFIX = "home_view_";
 const HOME_VIEW_USER = "user";
@@ -761,6 +762,81 @@ function buildManagerPendingRequestSection(request, memberSummary, currentYear) 
     };
 }
 
+function buildCompactLeaveText(request, options = {}) {
+    const { includeReason = true } = options;
+    const reasonLine = includeReason && request.reason && request.reason.trim()
+        ? `\n${request.reason.trim()}`
+        : "";
+
+    return `*${request.employee_name}*\n${formatDateWithWeekday(request.start_date)} → ${formatDateWithWeekday(request.end_date)}\n${buildDurationText(request.start_date, request.end_date)}${reasonLine}`;
+}
+
+function buildReviewHomeActionBlock(requestId) {
+    return {
+        type: "actions",
+        elements: [
+            {
+                type: "button",
+                text: {
+                    type: "plain_text",
+                    text: "Review",
+                },
+                style: "primary",
+                action_id: "open_review_timeoff_modal",
+                value: requestId,
+            },
+        ],
+    };
+}
+
+function buildLeaveListSection(title, rows, emptyText) {
+    if (!rows.length) {
+        return [
+            {
+                type: "header",
+                text: {
+                    type: "plain_text",
+                    text: title,
+                },
+            },
+            {
+                type: "section",
+                text: {
+                    type: "mrkdwn",
+                    text: emptyText,
+                },
+            },
+        ];
+    }
+
+    const blocks = [
+        {
+            type: "header",
+            text: {
+                type: "plain_text",
+                text: title,
+            },
+        },
+    ];
+
+    for (const row of rows) {
+        blocks.push(
+            {
+                type: "section",
+                text: {
+                    type: "mrkdwn",
+                    text: buildCompactLeaveText(row, { includeReason: true }),
+                },
+            },
+            {
+                type: "divider",
+            },
+        );
+    }
+
+    return blocks;
+}
+
 app.action("switch_to_user_dashboard", async ({ ack, body, client }) => {
     await ack();
 
@@ -787,6 +863,132 @@ app.action("switch_to_manager_dashboard", async ({ ack, body, client }) => {
         await publishHomeTab(client, body.user.id);
     } catch (error) {
         console.error("Failed to switch to manager dashboard:", error);
+    }
+});
+
+app.action("open_review_timeoff_modal", async ({ ack, body, client, action }) => {
+    await ack();
+
+    try {
+        const request = await getTimeOffRequestById(action.value);
+
+        await client.views.open({
+            trigger_id: body.trigger_id,
+            view: {
+                type: "modal",
+                callback_id: "review_leave_request_form",
+                private_metadata: request.id,
+                title: {
+                    type: "plain_text",
+                    text: "Review leave request",
+                },
+                submit: {
+                    type: "plain_text",
+                    text: "Submit",
+                },
+                close: {
+                    type: "plain_text",
+                    text: "Close",
+                },
+                blocks: [
+                    {
+                        type: "section",
+                        text: {
+                            type: "mrkdwn",
+                            text: `*Name:* ${request.employee_name}\n*Date:* ${formatDateWithWeekday(request.start_date)} → ${formatDateWithWeekday(request.end_date)}\n*Duration:* ${buildDurationText(request.start_date, request.end_date)}\n*Type / details:* ${request.reason && request.reason.trim() ? request.reason.trim() : "Vacation"}`,
+                        },
+                    },
+                    {
+                        type: "input",
+                        block_id: "decision",
+                        label: {
+                            type: "plain_text",
+                            text: "Approve / deny leave",
+                        },
+                        element: {
+                            type: "radio_buttons",
+                            action_id: "decision_value",
+                            initial_option: {
+                                text: {
+                                    type: "plain_text",
+                                    text: "Approve",
+                                },
+                                value: "approved",
+                            },
+                            options: [
+                                {
+                                    text: {
+                                        type: "plain_text",
+                                        text: "Approve",
+                                    },
+                                    value: "approved",
+                                },
+                                {
+                                    text: {
+                                        type: "plain_text",
+                                        text: "Deny",
+                                    },
+                                    value: "rejected",
+                                },
+                            ],
+                        },
+                    },
+                    {
+                        type: "input",
+                        optional: true,
+                        block_id: "comment",
+                        label: {
+                            type: "plain_text",
+                            text: "Comment (optional)",
+                        },
+                        element: {
+                            type: "plain_text_input",
+                            multiline: true,
+                            action_id: "comment_value",
+                        },
+                    },
+                ],
+            },
+        });
+    } catch (error) {
+        console.error("Failed to open review modal:", error);
+    }
+});
+
+app.view("review_leave_request_form", async ({ ack, body, view, client }) => {
+    await ack();
+
+    try {
+        const requestId = view.private_metadata;
+        const decision = view.state.values.decision.decision_value.selected_option.value;
+        const comment = view.state.values.comment.comment_value.value || "";
+
+        const { data, error } = await supabase
+            .from("time_off_requests")
+            .update({ status: decision })
+            .eq("id", requestId)
+            .select()
+            .single();
+
+        if (error) {
+            throw error;
+        }
+
+        const message = buildSimpleStatusMessage(
+            decision === "approved" ? "✅" : "❌",
+            decision === "approved" ? "Your request was approved." : "Your request was rejected.",
+            data.start_date,
+            data.end_date,
+            data.reason,
+        ) + (comment && comment.trim() ? `\n\nManager comment\n${comment.trim()}` : "");
+
+        await Promise.all([
+            notifyRequester(client, data.slack_user_id, message),
+            publishHomeTab(client, body.user.id),
+            publishHomeTab(client, data.slack_user_id),
+        ]);
+    } catch (error) {
+        console.error("Failed to review leave request:", error);
     }
 });
 app.action("manager_adjust_allowance", async ({ ack, body, client }) => {
@@ -958,42 +1160,61 @@ async function publishHomeTab(client, userId) {
     ];
 
     if (activeView === HOME_VIEW_MANAGER) {
+        const today = new Date().toISOString().slice(0, 10);
+        const currentlyOnLeave = upcomingTimeOff.filter(
+            (request) => request.start_date <= today && request.end_date >= today,
+        );
+        const nextFiveLeaves = upcomingTimeOff
+            .filter((request) => request.start_date > today)
+            .slice(0, 5);
+
+        const topActionElements = [
+            ...(isOwner
+                ? [
+                    {
+                        type: "button",
+                        text: { type: "plain_text", text: "Managers" },
+                        action_id: "open_manager_config",
+                    },
+                ]
+                : []),
+            {
+                type: "button",
+                text: { type: "plain_text", text: "Manage team" },
+                action_id: "open_team_management_panel",
+            },
+            {
+                type: "button",
+                text: { type: "plain_text", text: "Add Leave" },
+                action_id: "manager_add_timeoff",
+            },
+            {
+                type: "button",
+                text: { type: "plain_text", text: "Options" },
+                action_id: "manager_adjust_allowance",
+            },
+        ];
+
+        if (WEB_CALENDAR_URL) {
+            topActionElements.splice(2, 0, {
+                type: "button",
+                text: { type: "plain_text", text: "Web App" },
+                url: WEB_CALENDAR_URL,
+                action_id: "open_web_calendar_link",
+            });
+        }
+
         blocks.push(
+            {
+                type: "actions",
+                elements: topActionElements,
+            },
             {
                 type: "section",
                 text: {
                     type: "mrkdwn",
-                    text: `*Manager Settings*\n\nAnnual leave allowance: *${annualLeaveDays} day(s)*\nManagers:\n${managerSummaryText(managerIds)}\n\n*Active team members (${activeTeamMembers.length})*\n${buildTeamMembersPreviewText(activeTeamMembers)}`,
+                    text: `Hey <@${userId}>! You can view and manage your team's leaves here.\n\n*Managers*\n${managerSummaryText(managerIds)}\n\n*Active team members (${activeTeamMembers.length})*\n${buildTeamMembersPreviewText(activeTeamMembers)}`,
                 },
-            },
-            {
-                type: "actions",
-                elements: [
-                    ...(isOwner
-                        ? [
-                            {
-                                type: "button",
-                                text: { type: "plain_text", text: "Managers" },
-                                action_id: "open_manager_config",
-                            },
-                        ]
-                        : []),
-                    {
-                        type: "button",
-                        text: { type: "plain_text", text: "Manage team" },
-                        action_id: "open_team_management_panel",
-                    },
-                    {
-                        type: "button",
-                        text: { type: "plain_text", text: "Add time off" },
-                        action_id: "manager_add_timeoff",
-                    },
-                    {
-                        type: "button",
-                        text: { type: "plain_text", text: "Adjust allowance" },
-                        action_id: "manager_adjust_allowance",
-                    },
-                ],
             },
             {
                 type: "divider",
@@ -1002,14 +1223,7 @@ async function publishHomeTab(client, userId) {
                 type: "header",
                 text: {
                     type: "plain_text",
-                    text: "⏳ Pending approvals",
-                },
-            },
-            {
-                type: "section",
-                text: {
-                    type: "mrkdwn",
-                    text: `${pendingRequests.length} request(s) waiting for decision.`,
+                    text: "Pending Leaves",
                 },
             },
         );
@@ -1019,59 +1233,20 @@ async function publishHomeTab(client, userId) {
                 type: "section",
                 text: {
                     type: "mrkdwn",
-                    text: "No pending requests right now.",
+                    text: "No pending leaves right now.",
                 },
             });
         } else {
-            const currentYear = new Date().getFullYear();
-            const teamSummaryMap = new Map(
-                teamMemberSummaries.map((member) => [member.slack_user_id, member]),
-            );
             for (const request of pendingRequests) {
-
-                const memberSummary = teamSummaryMap.get(request.slack_user_id);
-
-                blocks.push(
-                    buildManagerPendingRequestSection(request, memberSummary, currentYear),
-                    buildApprovalActionBlock(request.id),
-                    {
-                        type: "divider",
-                    },
-                );
-            }
-        }
-
-        blocks.push({
-            type: "header",
-            text: {
-                type: "plain_text",
-                text: "🌴 Upcoming team holidays",
-            },
-        });
-
-
-
-
-
-        if (upcomingTimeOff.length === 0) {
-            blocks.push({
-                type: "section",
-                text: {
-                    type: "mrkdwn",
-                    text: "No upcoming approved requests right now.",
-                },
-            });
-        } else {
-            for (const request of upcomingTimeOff) {
                 blocks.push(
                     {
                         type: "section",
                         text: {
                             type: "mrkdwn",
-                            text: `*Approved*\n\n${buildRequestDetailsText(request)}`,
+                            text: buildCompactLeaveText(request, { includeReason: true }),
                         },
                     },
-                    buildManagerUpcomingActionBlock(request.id),
+                    buildReviewHomeActionBlock(request.id),
                     {
                         type: "divider",
                     },
@@ -1079,68 +1254,8 @@ async function publishHomeTab(client, userId) {
             }
         }
 
-
-        blocks.push(
-            {
-                type: "divider",
-            },
-            {
-                type: "header",
-                text: {
-                    type: "plain_text",
-                    text: "👥 Team Members Overview",
-                },
-            },
-            {
-                type: "context",
-                elements: [
-                    {
-                        type: "mrkdwn",
-                        text: "Used, available allowance, planned time off and past approved time off for each team member.",
-                    },
-                ],
-            },
-        );
-
-        if (teamMemberSummaries.length === 0) {
-            blocks.push({
-                type: "section",
-                text: {
-                    type: "mrkdwn",
-                    text: "No team members with recorded time off yet.",
-                },
-            });
-        } else {
-            for (const [index, member] of teamMemberSummaries.entries()) {
-                const plannedText = member.plannedRequests.length
-                    ? member.plannedRequests
-                        .slice(0, 5)
-                        .map((request) => `• ${formatDateWithWeekday(request.start_date)} → ${formatDateWithWeekday(request.end_date)} (${buildDurationText(request.start_date, request.end_date)})`)
-                        .join("\n")
-                    : "No planned approved time off.";
-
-                const pastText = member.pastRequests.length
-                    ? member.pastRequests
-                        .slice(0, 5)
-                        .map((request) => `• ${formatDateWithWeekday(request.start_date)} → ${formatDateWithWeekday(request.end_date)} (${buildDurationText(request.start_date, request.end_date)})`)
-                        .join("\n")
-                    : "No past approved time off.";
-
-                blocks.push(
-                    {
-                        type: "section",
-                        text: {
-                            type: "mrkdwn",
-                            text: `*${numberEmoji(index)} ${member.employee_name}*\nUsed: *${member.usedWorkingDays} working day(s)*\nAvailable: *${member.availableWorkingDays} working day(s)*\nAllowance: *${member.annualLeaveDays} day(s)*\n\n*Planned time off*\n${plannedText}\n\n*Past time off*\n${pastText}`,
-                        },
-                    },
-                    {
-                        type: "divider",
-                    },
-                );
-            }
-        }
-
+        blocks.push(...buildLeaveListSection("Currently on Leave", currentlyOnLeave, "Nobody is currently on leave."));
+        blocks.push(...buildLeaveListSection("Next 5 Leaves", nextFiveLeaves, "No upcoming approved leaves."));
     } else {
         const myPendingRequests = myEditableRequests.filter((request) => request.status === "pending");
         const myApprovedRequests = myEditableRequests.filter((request) => request.status === "approved");
