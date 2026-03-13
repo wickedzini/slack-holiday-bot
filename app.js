@@ -999,10 +999,17 @@ async function publishHomeTab(client, userId) {
                 type: "divider",
             },
             {
+                type: "header",
+                text: {
+                    type: "plain_text",
+                    text: "⏳ Pending approvals",
+                },
+            },
+            {
                 type: "section",
                 text: {
                     type: "mrkdwn",
-                    text: `⏳ *Pending approvals*\n${pendingRequests.length} request(s) waiting for decision.`,
+                    text: `${pendingRequests.length} request(s) waiting for decision.`,
                 },
             },
         );
@@ -1581,10 +1588,14 @@ async function updateApprovalSurface(client, body, statusLabel, data) {
     const statusEmoji = statusLabel === "Approved" ? "✅" : "❌";
     const summaryText = buildReadableStatusMessage(statusEmoji, statusLabel, data.employee_name, data.start_date, data.end_date, data.reason);
 
-    if (body.channel && body.message && body.message.ts) {
+    // Updated logic to support Block Actions from messages as well
+    const channelId = body.channel?.id || body.container?.channel_id;
+    const messageTs = body.message?.ts || body.container?.message_ts;
+
+    if (channelId && messageTs) {
         await client.chat.update({
-            channel: body.channel.id,
-            ts: body.message.ts,
+            channel: channelId,
+            ts: messageTs,
             text: `${statusLabel}: ${data.employee_name}`,
             blocks: [
                 {
