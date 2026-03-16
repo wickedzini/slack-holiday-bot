@@ -843,6 +843,11 @@ function buildLeaveListSection(title, rows, emptyText) {
     return blocks;
 }
 
+app.action("user_request_leave", async ({ ack, body, client }) => {
+    await ack();
+    await openTimeOffModal(client, body.trigger_id);
+});
+
 app.action("switch_to_user_dashboard", async ({ ack, body, client }) => {
     await ack();
 
@@ -1294,6 +1299,17 @@ async function publishHomeTab(client, userId) {
                     type: "mrkdwn",
                     text: `📅 *My Holiday*\n\nYear: *${myHolidaySummary.year}*\nUsed: *${myHolidaySummary.usedWorkingDays} working day(s)*\nAvailable: *${myHolidaySummary.availableWorkingDays} working day(s)*\nAnnual allowance: *${myHolidaySummary.annualLeaveDays} day(s)*`,
                 },
+            },
+            {
+                type: "actions",
+                elements: [
+                    {
+                        type: "button",
+                        text: { type: "plain_text", text: "✈️ Request Leave" },
+                        style: "primary",
+                        action_id: "user_request_leave",
+                    },
+                ],
             },
             {
                 type: "divider",
