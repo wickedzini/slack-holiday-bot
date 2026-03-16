@@ -423,6 +423,21 @@ async function getUpcomingApprovedTimeOff() {
         .gte("end_date", today)
         .order("start_date", { ascending: true });
 
+    if (error) throw error;
+    return data || [];
+}
+
+async function getAllYearApprovedTimeOff() {
+    const year = new Date().getFullYear();
+
+    const { data, error } = await supabase
+        .from("time_off_requests")
+        .select("id, slack_user_id, employee_name, start_date, end_date, reason, status")
+        .eq("status", "approved")
+        .gte("start_date", `${year}-01-01`)
+        .lte("start_date", `${year}-12-31`)
+        .order("start_date", { ascending: true });
+
     if (error) {
         throw error;
     }
@@ -884,6 +899,29 @@ function buildLeaveListSection(title, rows, emptyText) {
     return blocks;
 }
 
+app.action("view_all_leaves", async ({ ack, body, client }) => {
+    await ack();
+    const year = new Date().getFullYear();
+    const leaves = await getAllYearApprovedTimeOff();
+    const text = leaves.length
+        ? leaves.map((r) => `• ${buildCompactLeaveText(r, { includeReason: true })}`).join("\n\n")
+        : "No approved leaves this year.";
+    await client.views.open({
+        trigger_id: body.trigger_id,
+        view: {
+            type: "modal",
+            title: { type: "plain_text", text: `All Leaves ${year}` },
+            close: { type: "plain_text", text: "Close" },
+            blocks: [
+                {
+                    type: "section",
+                    text: { type: "mrkdwn", text: text },
+                },
+            ],
+        },
+    });
+});
+
 app.action("user_request_leave", async ({ ack, body, client }) => {
     await ack();
     await openTimeOffModal(client, body.trigger_id);
@@ -1156,6 +1194,7 @@ async function publishHomeTab(client, userId) {
     const [
         myHolidaySummary,
         upcomingTimeOff,
+        allYearTimeOff,
         myEditableRequests,
         annualLeaveDays,
         pendingRequests,
@@ -1164,6 +1203,7 @@ async function publishHomeTab(client, userId) {
     ] = await Promise.all([
         getMyHolidaySummary(userId),
         getUpcomingApprovedTimeOff(),
+        canViewManagerDashboard ? getAllYearApprovedTimeOff() : Promise.resolve([]),
         getEditableRequestsForUser(userId),
         getAnnualLeaveDaysLimit(),
         canViewManagerDashboard ? getPendingTimeOffRequests() : Promise.resolve([]),
@@ -1216,10 +1256,6 @@ async function publishHomeTab(client, userId) {
         const currentlyOnLeave = upcomingTimeOff.filter(
             (request) => request.start_date <= today && request.end_date >= today,
         );
-        const nextFiveLeaves = upcomingTimeOff
-            .filter((request) => request.start_date > today)
-            .slice(0, 5);
-
         const topActionElements = [
             ...(isOwner
                 ? [
@@ -1309,9 +1345,15 @@ async function publishHomeTab(client, userId) {
         blocks.push(...buildLeaveListSection("Currently on Leave", currentlyOnLeave, "Nobody is currently on leave."));
 
         blocks.push({
-            type: "header",
-            text: { type: "plain_text", text: "Next 5 Leaves" },
+            type: "section",
+            text: { type: "mrkdwn", text: "*Next 5 Leaves*" },
+            accessory: {
+                type: "button",
+                text: { type: "plain_text", text: `View all ${new Date().getFullYear()}` },
+                action_id: "view_all_leaves",
+            },
         });
+        const nextFiveLeaves = upcomingTimeOff.filter((r) => r.start_date > today).slice(0, 5);
         if (nextFiveLeaves.length === 0) {
             blocks.push({
                 type: "section",

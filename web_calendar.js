@@ -827,8 +827,14 @@ function renderHtml() {
 
     function renderPeopleSection() {
       var container = document.getElementById("peopleSection");
+      var isManager = state.data && state.data.isManager;
+      var currentUserId = state.data && state.data.currentUserId;
       var members = getFilteredMembers();
-      if (!members.length) { container.innerHTML = '<div class="empty">No members.</div>'; return; }
+      // Non-managers see only their own balance
+      if (!isManager && currentUserId && currentUserId !== "shared") {
+        members = members.filter(function (m) { return m.slack_user_id === currentUserId; });
+      }
+      if (!members.length) { container.innerHTML = '<div class="empty">No data.</div>'; return; }
       container.innerHTML = members.map(function (m) {
         var pct = Math.min(Math.round(m.used / Math.max(m.allowance, 1) * 100), 100);
         return '<div class="p-row">' +
@@ -842,7 +848,7 @@ function renderHtml() {
     function renderAll() {
       var isManager = state.data && state.data.isManager;
       document.getElementById("statsRow").style.display = isManager ? "" : "none";
-      document.getElementById("balancesCard").style.display = isManager ? "" : "none";
+      document.getElementById("balancesCard").style.display = ""; // visible for everyone
       renderMemberChips();
       renderStats();
       renderTimeline();
@@ -875,6 +881,7 @@ async function handleApiDashboardData(res, session) {
     try {
         const payload = await buildDashboardData();
         payload.isManager = session ? session.isManager : true;
+        payload.currentUserId = session ? session.userId : null;
         res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
         res.end(JSON.stringify(payload));
     } catch (error) {
