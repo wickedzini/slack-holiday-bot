@@ -11,13 +11,19 @@ const supabase = createClient(
 const PORT = Number(process.env.PORT || process.env.WEB_CALENDAR_PORT || 4000);
 const DEFAULT_ANNUAL_LEAVE_DAYS = 26;
 
-// ── Slack OAuth auth ──────────────────────────────────────────────────────────
+// ── Auth ──────────────────────────────────────────────────────────────────────
 const SLACK_CLIENT_ID = process.env.SLACK_CLIENT_ID;
 const SLACK_CLIENT_SECRET = process.env.SLACK_CLIENT_SECRET;
 const SLACK_TEAM_ID = process.env.SLACK_TEAM_ID;
+const WEB_SECRET = process.env.WEB_SECRET || null;           // fallback: simple password
 const SESSION_SECRET = process.env.SESSION_SECRET || "change-me-please";
 const SESSION_DAYS = 30;
-const AUTH_ENABLED = !!(SLACK_CLIENT_ID && SLACK_CLIENT_SECRET && SLACK_TEAM_ID);
+const OAUTH_ENABLED = !!(SLACK_CLIENT_ID && SLACK_CLIENT_SECRET && SLACK_TEAM_ID);
+const AUTH_ENABLED = OAUTH_ENABLED || !!WEB_SECRET;
+
+if (!AUTH_ENABLED) {
+    console.warn("⚠️  Web calendar has NO authentication configured. Set SLACK_CLIENT_ID/SLACK_CLIENT_SECRET/SLACK_TEAM_ID for Slack OAuth, or WEB_SECRET for simple password auth.");
+}
 
 function parseCookies(req) {
     const out = {};
@@ -50,7 +56,7 @@ function verifySession(token) {
 }
 
 function getSession(req) {
-    if (!AUTH_ENABLED) return { userId: null, isManager: true };
+    if (!AUTH_ENABLED) return null; // block access — no auth configured
     return verifySession(parseCookies(req)["wb_session"]);
 }
 
@@ -58,6 +64,34 @@ function setSessionCookie(res, userId, isManager) {
     const exp = Date.now() + SESSION_DAYS * 24 * 60 * 60 * 1000;
     const token = signSession({ userId, isManager, exp });
     res.setHeader("Set-Cookie", `wb_session=${token}; Path=/; Max-Age=${SESSION_DAYS * 86400}; HttpOnly; SameSite=Lax`);
+}
+
+function renderLoginPage(error) {
+    return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>Login · Team Leave</title>
+<style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:Inter,sans-serif;background:#F7F7F7;display:flex;align-items:center;justify-content:center;min-height:100vh}
+.box{background:#fff;border-radius:12px;padding:40px;width:320px;box-shadow:0 2px 12px rgba(0,0,0,.08)}
+h1{font-size:18px;font-weight:700;margin-bottom:6px}p{font-size:13px;color:#777;margin-bottom:24px}
+input{width:100%;padding:10px 12px;border:1px solid #E0E0E0;border-radius:8px;font-size:14px;margin-bottom:12px}
+button{width:100%;padding:10px;background:#111;color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer}
+.err{color:#c0392b;font-size:13px;margin-bottom:12px}</style></head>
+<body><div class="box"><h1>Team Leave</h1><p>Enter the access password to continue.</p>
+${error ? `<div class="err">${error}</div>` : ""}
+<form method="POST" action="/login"><input type="password" name="secret" placeholder="Password" autofocus>
+<button type="submit">Continue</button></form></div></body></html>`;
+}
+
+async function handleLoginPost(req, res) {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const body = new URLSearchParams(Buffer.concat(chunks).toString());
+    const provided = body.get("secret") || "";
+    if (crypto.timingSafeEqual(Buffer.from(provided), Buffer.from(WEB_SECRET))) {
+        setSessionCookie(res, "shared", true); // WEB_SECRET users get manager access
+        res.writeHead(302, { Location: "/" });
+    } else {
+        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+        res.end(renderLoginPage("Incorrect password."));
+    }
 }
 
 function getOAuthRedirectUri(req) {
@@ -838,21 +872,29 @@ async function handleApiDashboardData(res, session) {
 const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, `http://${req.headers.host}`);
 
-    // OAuth routes — no auth required
+    // Auth routes — no session required
     if (url.pathname === "/oauth/start") { handleOAuthStart(req, res); return; }
     if (url.pathname === "/oauth/callback") { await handleOAuthCallback(req, res, url); return; }
+    if (url.pathname === "/login" && req.method === "GET") {
+        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+        res.end(renderLoginPage());
+        return;
+    }
+    if (url.pathname === "/login" && req.method === "POST") {
+        await handleLoginPost(req, res);
+        return;
+    }
 
     // All other routes require a valid session
     const session = getSession(req);
     if (!session) {
-        res.writeHead(302, { Location: "/oauth/start" });
+        // Redirect to appropriate login method
+        res.writeHead(302, { Location: OAUTH_ENABLED ? "/oauth/start" : "/login" });
         res.end();
         return;
     }
     // Refresh cookie on every visit (sliding 30-day window)
-    if (AUTH_ENABLED && session.userId) {
-        setSessionCookie(res, session.userId, session.isManager);
-    }
+    if (session.userId) setSessionCookie(res, session.userId, session.isManager);
 
     if (url.pathname === "/api/dashboard-data") {
         await handleApiDashboardData(res, session);

@@ -2566,12 +2566,12 @@ async function sendUpcomingLeaveReminders() {
 }
 
 function scheduleLeaveReminders() {
-    // Run daily at 07:00 UTC (09:00 Warsaw)
+    // Run daily at 10:00 UTC (12:00 Warsaw)
     const now = new Date();
-    const next = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 7, 0, 0));
+    const next = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 10, 0, 0));
     if (now >= next) next.setUTCDate(next.getUTCDate() + 1);
     const delay = next - now;
-    console.log(`📅 Leave reminders scheduled — next run in ${Math.round(delay / 60000)} min (07:00 UTC)`);
+    console.log(`📅 Leave reminders scheduled — next run in ${Math.round(delay / 60000)} min (10:00 UTC / 12:00 Warsaw)`);
     setTimeout(function tick() {
         sendUpcomingLeaveReminders().catch(console.error);
         setTimeout(tick, 24 * 60 * 60 * 1000);
