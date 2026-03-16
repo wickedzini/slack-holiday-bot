@@ -586,6 +586,7 @@ function renderHtml() {
     table.evt-table thead th { text-align: left; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.07em; color: #ccc; padding: 12px 20px 10px; border-bottom: 1px solid #F0F0F0; }
     table.evt-table tbody td { padding: 10px 20px; border-top: 1px solid #F7F7F7; font-size: 13px; font-weight: 500; color: #333; }
     table.evt-table .evt-month-row td { background: #FAFAFA; padding: 6px 20px; font-size: 10px; font-weight: 700; color: #999; text-transform: uppercase; letter-spacing: 0.07em; border-top: 1px solid #EBEBEB; }
+    table.evt-table .evt-gap-row td { height: 12px; background: #fff; border: none; padding: 0; }
     .empty { padding: 32px 20px; text-align: center; color: #bbb; font-size: 13px; }
 
     /* ── People balances ── */
@@ -820,6 +821,7 @@ function renderHtml() {
             '<td>' + e.totalDays + ' (' + e.workingDays + ')</td>' +
             '<td style="color:#bbb">' + (e.reason || '\u2014') + '</td></tr>';
         });
+        html += '<tr class="evt-gap-row"><td colspan="4"></td></tr>';
       });
       html += '</tbody></table>';
       container.innerHTML = html;

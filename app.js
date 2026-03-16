@@ -1344,15 +1344,23 @@ async function publishHomeTab(client, userId) {
 
         blocks.push(...buildLeaveListSection("Currently on Leave", currentlyOnLeave, "Nobody is currently on leave."));
 
-        blocks.push({
-            type: "section",
-            text: { type: "mrkdwn", text: "*Next 5 Leaves*" },
-            accessory: {
-                type: "button",
-                text: { type: "plain_text", text: `View all ${new Date().getFullYear()}` },
-                action_id: "view_all_leaves",
+        blocks.push(
+            { type: "divider" },
+            {
+                type: "header",
+                text: { type: "plain_text", text: "Next 5 Leaves" },
             },
-        });
+            {
+                type: "actions",
+                elements: [
+                    {
+                        type: "button",
+                        text: { type: "plain_text", text: `View all ${new Date().getFullYear()}` },
+                        action_id: "view_all_leaves",
+                    },
+                ],
+            },
+        );
         const nextFiveLeaves = upcomingTimeOff.filter((r) => r.start_date > today).slice(0, 5);
         if (nextFiveLeaves.length === 0) {
             blocks.push({
