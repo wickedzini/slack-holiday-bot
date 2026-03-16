@@ -379,13 +379,13 @@ function renderHtml() {
     .tl-name { position: sticky; left: 0; z-index: 2; background: #fff; }
     .tl-month-corner { background: #F8F8F8 !important; height: 22px; z-index: 3 !important; }
     .tl-month-th { background: #F8F8F8; height: 22px; font-size: 10px; font-weight: 700; color: #555; text-transform: uppercase; letter-spacing: 0.07em; padding: 0 8px !important; white-space: nowrap; overflow: hidden; text-align: left; vertical-align: middle; }
-    .tl-month-sep { border-right: 1px solid #D0D0D0 !important; }
+    .tl-month-sep { border-right: 2px solid #999 !important; }
     .tl-day-th { height: 40px; text-align: center; vertical-align: middle; }
     .tl-day-th.weekend { background: #FAFAFA; }
     .tl-day-th.today { background: #EEF3FF; }
     .tl-day-th.today .tl-dow { color: #2563EB; opacity: 0.6; }
     .tl-day-th.today .tl-day { color: #2563EB; font-weight: 800; }
-    .tl-day-th.month-start { border-left: 1px solid #D0D0D0 !important; }
+    .tl-day-th.month-start { border-left: 2px solid #999 !important; }
     .tl-dow { display: block; font-size: 8px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: #ccc; line-height: 1; }
     .tl-day { display: block; font-size: 11px; font-weight: 600; color: #aaa; line-height: 1.5; }
     .tl-name-inner { display: flex; align-items: center; gap: 8px; padding: 0 12px; height: 40px; }
@@ -395,7 +395,7 @@ function renderHtml() {
     .tl-cell.leave { background: #EEF3FF; }
     .tl-cell.leave::after { content: ""; position: absolute; left: 3px; right: 3px; top: 50%; height: 12px; transform: translateY(-50%); border-radius: 999px; background: #BFCFFA; }
     .tl-cell.today { box-shadow: inset 2px 0 0 #2563EB, inset -2px 0 0 #2563EB; }
-    .tl-cell.month-start { border-left: 1px solid #D0D0D0 !important; }
+    .tl-cell.month-start { border-left: 2px solid #999 !important; }
     .av { width: 24px; height: 24px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; color: #fff; font-size: 8px; font-weight: 800; flex: none; }
     .av-img { width: 24px; height: 24px; border-radius: 50%; object-fit: cover; flex: none; display: block; }
     .pname { font-size: 12px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #222; }
