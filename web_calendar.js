@@ -1,4 +1,5 @@
 const http = require("http");
+const crypto = require("crypto");
 const { URL } = require("url");
 const { createClient } = require("@supabase/supabase-js");
 
@@ -9,6 +10,128 @@ const supabase = createClient(
 
 const PORT = Number(process.env.PORT || process.env.WEB_CALENDAR_PORT || 4000);
 const DEFAULT_ANNUAL_LEAVE_DAYS = 26;
+
+// ── Slack OAuth auth ──────────────────────────────────────────────────────────
+const SLACK_CLIENT_ID = process.env.SLACK_CLIENT_ID;
+const SLACK_CLIENT_SECRET = process.env.SLACK_CLIENT_SECRET;
+const SLACK_TEAM_ID = process.env.SLACK_TEAM_ID;
+const SESSION_SECRET = process.env.SESSION_SECRET || "change-me-please";
+const SESSION_DAYS = 30;
+const AUTH_ENABLED = !!(SLACK_CLIENT_ID && SLACK_CLIENT_SECRET && SLACK_TEAM_ID);
+
+function parseCookies(req) {
+    const out = {};
+    (req.headers.cookie || "").split(";").forEach((part) => {
+        const [k, ...v] = part.trim().split("=");
+        if (k) out[decodeURIComponent(k.trim())] = decodeURIComponent(v.join("=").trim());
+    });
+    return out;
+}
+
+function signSession(payload) {
+    const b64 = Buffer.from(JSON.stringify(payload)).toString("base64url");
+    const sig = crypto.createHmac("sha256", SESSION_SECRET).update(b64).digest("base64url");
+    return `${b64}.${sig}`;
+}
+
+function verifySession(token) {
+    if (!token) return null;
+    const dot = token.lastIndexOf(".");
+    if (dot < 0) return null;
+    const b64 = token.slice(0, dot);
+    const sig = token.slice(dot + 1);
+    const expected = crypto.createHmac("sha256", SESSION_SECRET).update(b64).digest("base64url");
+    try {
+        if (!crypto.timingSafeEqual(Buffer.from(sig, "base64url"), Buffer.from(expected, "base64url"))) return null;
+        const payload = JSON.parse(Buffer.from(b64, "base64url").toString());
+        if (payload.exp < Date.now()) return null;
+        return payload;
+    } catch { return null; }
+}
+
+function getSession(req) {
+    if (!AUTH_ENABLED) return { userId: null, isManager: true };
+    return verifySession(parseCookies(req)["wb_session"]);
+}
+
+function setSessionCookie(res, userId, isManager) {
+    const exp = Date.now() + SESSION_DAYS * 24 * 60 * 60 * 1000;
+    const token = signSession({ userId, isManager, exp });
+    res.setHeader("Set-Cookie", `wb_session=${token}; Path=/; Max-Age=${SESSION_DAYS * 86400}; HttpOnly; SameSite=Lax`);
+}
+
+function getOAuthRedirectUri(req) {
+    const proto = req.headers["x-forwarded-proto"] || "http";
+    const host = req.headers["x-forwarded-host"] || req.headers.host;
+    return `${proto}://${host}/oauth/callback`;
+}
+
+async function getManagerIds() {
+    const { data } = await supabase
+        .from("app_settings")
+        .select("value")
+        .eq("key", "manager_user_ids")
+        .maybeSingle();
+    return Array.isArray(data?.value) ? data.value.filter(Boolean) : [];
+}
+
+function handleOAuthStart(req, res) {
+    const params = new URLSearchParams({
+        client_id: SLACK_CLIENT_ID,
+        user_scope: "identity.basic",
+        redirect_uri: getOAuthRedirectUri(req),
+    });
+    res.writeHead(302, { Location: `https://slack.com/oauth/v2/authorize?${params}` });
+    res.end();
+}
+
+async function handleOAuthCallback(req, res, url) {
+    const code = url.searchParams.get("code");
+    if (!code) { res.writeHead(400); res.end("Missing code"); return; }
+
+    const body = new URLSearchParams({
+        client_id: SLACK_CLIENT_ID,
+        client_secret: SLACK_CLIENT_SECRET,
+        code,
+        redirect_uri: getOAuthRedirectUri(req),
+    });
+
+    let json;
+    try {
+        const r = await fetch("https://slack.com/api/oauth.v2.access", {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: body.toString(),
+        });
+        json = await r.json();
+    } catch (err) {
+        console.error("OAuth token exchange failed:", err);
+        res.writeHead(500); res.end("OAuth error"); return;
+    }
+
+    if (!json.ok) {
+        console.error("Slack OAuth error:", json.error);
+        res.writeHead(401, { "Content-Type": "text/plain" });
+        res.end("Login failed: " + json.error);
+        return;
+    }
+
+    const userId = json.authed_user?.id;
+    const teamId = json.team?.id;
+
+    if (SLACK_TEAM_ID && teamId !== SLACK_TEAM_ID) {
+        res.writeHead(403, { "Content-Type": "text/plain" });
+        res.end("Access denied: wrong workspace");
+        return;
+    }
+
+    const managerIds = await getManagerIds();
+    const isManager = managerIds.includes(userId);
+
+    setSessionCookie(res, userId, isManager);
+    res.writeHead(302, { Location: "/" });
+    res.end();
+}
 const USER_ALLOWANCE_OVERRIDE_TABLE = "user_leave_allowances";
 
 const POLISH_DATE_FORMAT = new Intl.DateTimeFormat("pl-PL", {
@@ -453,14 +576,14 @@ function renderHtml() {
       <div class="timeline-wrap"><div id="timelineGrid"></div></div>
     </div>
 
-    <div class="card stats-row" id="statsRow"></div>
-
     <div class="card" id="leaveCard">
       <div class="card-hd" style="border-bottom:1px solid #F0F0F0">
         <div><div class="card-title">All approved leave</div><div class="card-sub">Grouped by month · empty months hidden</div></div>
       </div>
       <div id="eventsTable"></div>
     </div>
+
+    <div class="card stats-row" id="statsRow"></div>
 
     <div class="card" id="balancesCard">
       <div class="card-hd" style="border-bottom:1px solid #F0F0F0">
@@ -668,6 +791,9 @@ function renderHtml() {
     }
 
     function renderAll() {
+      var isManager = state.data && state.data.isManager;
+      document.getElementById("statsRow").style.display = isManager ? "" : "none";
+      document.getElementById("balancesCard").style.display = isManager ? "" : "none";
       renderMemberChips();
       renderStats();
       renderTimeline();
@@ -696,9 +822,10 @@ function renderHtml() {
 </html>`;
 }
 
-async function handleApiDashboardData(res) {
+async function handleApiDashboardData(res, session) {
     try {
         const payload = await buildDashboardData();
+        payload.isManager = session ? session.isManager : true;
         res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
         res.end(JSON.stringify(payload));
     } catch (error) {
@@ -711,8 +838,24 @@ async function handleApiDashboardData(res) {
 const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, `http://${req.headers.host}`);
 
+    // OAuth routes — no auth required
+    if (url.pathname === "/oauth/start") { handleOAuthStart(req, res); return; }
+    if (url.pathname === "/oauth/callback") { await handleOAuthCallback(req, res, url); return; }
+
+    // All other routes require a valid session
+    const session = getSession(req);
+    if (!session) {
+        res.writeHead(302, { Location: "/oauth/start" });
+        res.end();
+        return;
+    }
+    // Refresh cookie on every visit (sliding 30-day window)
+    if (AUTH_ENABLED && session.userId) {
+        setSessionCookie(res, session.userId, session.isManager);
+    }
+
     if (url.pathname === "/api/dashboard-data") {
-        await handleApiDashboardData(res);
+        await handleApiDashboardData(res, session);
         return;
     }
 

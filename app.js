@@ -2509,7 +2509,77 @@ app.action("reject_timeoff", async ({ ack, action, body, client }) => {
     }
 });
 
+// ── 7-day leave reminders ─────────────────────────────────────────────────────
+
+async function sendUpcomingLeaveReminders() {
+    const managerIds = await getManagerIds();
+    if (!managerIds.length) return;
+
+    const today = new Date();
+    const target = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() + 7));
+    const targetDate = formatDateForStorage(target);
+
+    const { data: requests, error } = await supabase
+        .from("time_off_requests")
+        .select("id, slack_user_id, employee_name, start_date, end_date, reason, status")
+        .eq("status", "approved")
+        .eq("start_date", targetDate);
+
+    if (error) { console.error("Reminder query failed:", error); return; }
+    if (!requests?.length) return;
+
+    for (const request of requests) {
+        const duration = buildDurationText(request.start_date, request.end_date);
+        const blocks = [
+            {
+                type: "section",
+                text: {
+                    type: "mrkdwn",
+                    text: "Hey, just wanted to remind you that some team members logged a time off soon:",
+                },
+            },
+            {
+                type: "section",
+                fields: [
+                    { type: "mrkdwn", text: `*Who?*\n${request.employee_name} <@${request.slack_user_id}>` },
+                    { type: "mrkdwn", text: `*What?*\n🌴 Vacation (${duration})` },
+                    { type: "mrkdwn", text: `*Status?*\n✅ Accepted` },
+                    { type: "mrkdwn", text: `*When?*\n${formatDateWithWeekday(request.start_date)}` },
+                ],
+            },
+        ];
+
+        for (const managerId of managerIds) {
+            try {
+                const dm = await app.client.conversations.open({ users: managerId });
+                await app.client.chat.postMessage({
+                    channel: dm.channel.id,
+                    text: `Reminder: ${request.employee_name} has time off starting in 7 days`,
+                    blocks,
+                });
+            } catch (err) {
+                console.error(`Failed to send reminder to manager ${managerId}:`, err.message);
+            }
+        }
+    }
+    console.log(`📅 Sent leave reminders for ${requests.length} upcoming leave(s) starting on ${targetDate}`);
+}
+
+function scheduleLeaveReminders() {
+    // Run daily at 07:00 UTC (09:00 Warsaw)
+    const now = new Date();
+    const next = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 7, 0, 0));
+    if (now >= next) next.setUTCDate(next.getUTCDate() + 1);
+    const delay = next - now;
+    console.log(`📅 Leave reminders scheduled — next run in ${Math.round(delay / 60000)} min (07:00 UTC)`);
+    setTimeout(function tick() {
+        sendUpcomingLeaveReminders().catch(console.error);
+        setTimeout(tick, 24 * 60 * 60 * 1000);
+    }, delay);
+}
+
 (async () => {
     await app.start(process.env.PORT || 3000);
     console.log(`⚡ Slack bot running on port ${process.env.PORT || 3000}`);
+    scheduleLeaveReminders();
 })();
