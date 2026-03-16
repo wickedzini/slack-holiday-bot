@@ -378,7 +378,7 @@ function renderHtml() {
     .tl-table th, .tl-table td { padding: 0; border-right: 1px solid #EBEBEB; border-bottom: 1px solid #EBEBEB; }
     .tl-name { position: sticky; left: 0; z-index: 2; background: #fff; }
     .tl-month-corner { background: #F8F8F8 !important; height: 22px; z-index: 3 !important; }
-    .tl-month-th { background: #F8F8F8; height: 22px; font-size: 9px; font-weight: 700; color: #999; text-transform: uppercase; letter-spacing: 0.07em; padding: 0 8px !important; white-space: nowrap; overflow: hidden; text-align: left; vertical-align: middle; }
+    .tl-month-th { background: #F8F8F8; height: 22px; font-size: 10px; font-weight: 700; color: #555; text-transform: uppercase; letter-spacing: 0.07em; padding: 0 8px !important; white-space: nowrap; overflow: hidden; text-align: left; vertical-align: middle; }
     .tl-month-sep { border-right: 1px solid #D0D0D0 !important; }
     .tl-day-th { height: 40px; text-align: center; vertical-align: middle; }
     .tl-day-th.weekend { background: #FAFAFA; }
@@ -552,7 +552,7 @@ function renderHtml() {
       var totalDays = 0;
       for (var m = 0; m < 12; m += 1) {
         var daysInMonth = new Date(Date.UTC(year, m + 1, 0)).getUTCDate();
-        var monthName = new Date(Date.UTC(year, m, 1)).toLocaleDateString("en-US", { month: "short", timeZone: "Europe/Warsaw" });
+        var monthName = new Date(Date.UTC(year, m, 1)).toLocaleDateString("en-US", { month: "long", timeZone: "Europe/Warsaw" });
         var days = [];
         for (var d = 1; d <= daysInMonth; d += 1) {
           var dateObj = new Date(Date.UTC(year, m, d));
