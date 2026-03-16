@@ -11,6 +11,47 @@ const supabase = createClient(
     process.env.SUPABASE_SERVICE_ROLE_KEY,
 );
 
+const LEAVE_TYPES = [
+    { value: "Vacation",       label: "🌴 Vacation" },
+    { value: "Sick Leave",     label: "🤒 Sick Leave" },
+    { value: "Work from Home", label: "🏠 Work from Home" },
+    { value: "Business Trip",  label: "✈️ Business Trip" },
+    { value: "Not Paid Day",   label: "🤝 Not Paid Day" },
+    { value: "Other",          label: "❓ Other" },
+];
+
+function leaveTypeBlock(initialType) {
+    const initial = LEAVE_TYPES.find((t) => t.value === initialType) || LEAVE_TYPES[0];
+    return {
+        type: "input",
+        block_id: "leave_type",
+        label: { type: "plain_text", text: "Type" },
+        element: {
+            type: "static_select",
+            action_id: "leave_type_select",
+            initial_option: { text: { type: "plain_text", text: initial.label }, value: initial.value },
+            options: LEAVE_TYPES.map((t) => ({
+                text: { type: "plain_text", text: t.label },
+                value: t.value,
+            })),
+        },
+    };
+}
+
+function parseLeaveType(reason) {
+    // Extract type from stored "Type — notes" or plain type string
+    const match = LEAVE_TYPES.find((t) => reason && (reason === t.value || reason.startsWith(t.value + " — ")));
+    if (match) {
+        const notes = reason.startsWith(match.value + " — ") ? reason.slice(match.value.length + 3) : "";
+        return { type: match.value, notes };
+    }
+    return { type: "Vacation", notes: reason || "" };
+}
+
+function buildReason(type, notes) {
+    return notes && notes.trim() ? `${type} — ${notes.trim()}` : type;
+}
+
 const MANAGER_IDS_KEY = "manager_user_ids";
 const ANNUAL_LEAVE_DAYS_KEY = "annual_leave_days";
 const DEFAULT_ANNUAL_LEAVE_DAYS = 26;
@@ -1668,6 +1709,7 @@ async function openTimeOffModal(client, triggerId, initialValues = {}, metadata 
                         },
                     ]
                     : []),
+                leaveTypeBlock(parseLeaveType(initialValues.reason || "").type),
                 {
                     type: "input",
                     block_id: "start",
@@ -1699,14 +1741,14 @@ async function openTimeOffModal(client, triggerId, initialValues = {}, metadata 
                     block_id: "reason",
                     label: {
                         type: "plain_text",
-                        text: "Reason / details",
+                        text: "Notes / details",
                     },
                     optional: true,
                     element: {
                         type: "plain_text_input",
                         action_id: "reason_text",
                         multiline: true,
-                        ...(initialValues.reason ? { initial_value: initialValues.reason } : {}),
+                        ...(initialValues.reason ? { initial_value: parseLeaveType(initialValues.reason).notes } : {}),
                     },
                 },
             ],
@@ -2057,6 +2099,9 @@ app.action("manager_add_timeoff", async ({ ack, body, client }) => {
                         },
                     },
                     {
+                        ...leaveTypeBlock("Vacation"),
+                    },
+                    {
                         type: "input",
                         block_id: "start",
                         label: {
@@ -2086,7 +2131,7 @@ app.action("manager_add_timeoff", async ({ ack, body, client }) => {
                         optional: true,
                         label: {
                             type: "plain_text",
-                            text: "Reason",
+                            text: "Notes / details",
                         },
                         element: {
                             type: "plain_text_input",
@@ -2288,7 +2333,8 @@ app.view("timeoff_form", async ({ ack, body, view, client }) => {
 
     const startDate = view.state.values.start.start_date.selected_date;
     const endDate = view.state.values.end.end_date.selected_date;
-    const reason = view.state.values.reason?.reason_text?.value || "";
+    const leaveType = view.state.values.leave_type?.leave_type_select?.selected_option?.value || "Vacation";
+    const reason = buildReason(leaveType, view.state.values.reason?.reason_text?.value || "");
     const slackUserId = body.user.id;
     const employeeName = await getSlackDisplayName(client, slackUserId, body.user.username || body.user.id);
     const metadata = view.private_metadata ? JSON.parse(view.private_metadata) : {};
@@ -2400,7 +2446,8 @@ app.view("manager_add_timeoff_form", async ({ ack, body, view, client }) => {
         const slackUserId = view.state.values.user.user_id.selected_user;
         const startDate = view.state.values.start.start_date.selected_date;
         const endDate = view.state.values.end.end_date.selected_date;
-        const reason = view.state.values.reason?.reason_text?.value || "";
+        const leaveType = view.state.values.leave_type?.leave_type_select?.selected_option?.value || "Vacation";
+        const reason = buildReason(leaveType, view.state.values.reason?.reason_text?.value || "");
 
         const employeeName = await getSlackDisplayName(client, slackUserId);
 

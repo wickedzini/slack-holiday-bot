@@ -81,16 +81,30 @@ ${error ? `<div class="err">${error}</div>` : ""}
 }
 
 async function handleLoginPost(req, res) {
-    const chunks = [];
-    for await (const chunk of req) chunks.push(chunk);
-    const body = new URLSearchParams(Buffer.concat(chunks).toString());
-    const provided = body.get("secret") || "";
-    if (crypto.timingSafeEqual(Buffer.from(provided), Buffer.from(WEB_SECRET))) {
-        setSessionCookie(res, "shared", true); // WEB_SECRET users get manager access
-        res.writeHead(302, { Location: "/" });
-    } else {
-        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-        res.end(renderLoginPage("Incorrect password."));
+    try {
+        const chunks = [];
+        for await (const chunk of req) chunks.push(chunk);
+        const body = new URLSearchParams(Buffer.concat(chunks).toString());
+        const provided = body.get("secret") || "";
+        const secret = WEB_SECRET || "";
+        // timingSafeEqual requires equal-length buffers — pad to same length
+        const a = Buffer.alloc(Math.max(provided.length, secret.length));
+        const b = Buffer.alloc(Math.max(provided.length, secret.length));
+        Buffer.from(provided).copy(a);
+        Buffer.from(secret).copy(b);
+        const match = provided.length === secret.length && crypto.timingSafeEqual(a, b);
+        if (match) {
+            setSessionCookie(res, "shared", true);
+            res.writeHead(302, { Location: "/" });
+            res.end();
+        } else {
+            res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+            res.end(renderLoginPage("Incorrect password."));
+        }
+    } catch (err) {
+        console.error("Login error:", err);
+        res.writeHead(500, { "Content-Type": "text/plain" });
+        res.end("Login error");
     }
 }
 
@@ -505,6 +519,7 @@ function renderHtml() {
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Team Leave</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🌴</text></svg>">
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: Inter, ui-sans-serif, system-ui, sans-serif; background: #F5F5F5; color: #111; -webkit-font-smoothing: antialiased; }
