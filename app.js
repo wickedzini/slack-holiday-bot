@@ -1392,6 +1392,14 @@ async function publishHomeTab(client, userId) {
                         style: "primary",
                         action_id: "user_request_leave",
                     },
+                    ...(WEB_CALENDAR_URL
+                        ? [{
+                            type: "button",
+                            text: { type: "plain_text", text: "Web App" },
+                            url: WEB_CALENDAR_URL,
+                            action_id: "open_web_calendar_link",
+                        }]
+                        : []),
                 ],
             },
             {
