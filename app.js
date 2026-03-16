@@ -221,11 +221,13 @@ function buildUpcomingGroupedText(rows) {
         return acc;
     }, {});
 
+    const today = new Date().toISOString().slice(0, 10);
     return Object.entries(grouped)
         .map(([label, items]) => {
-            const lines = items.map(
-                (item) => `• *${item.employee_name}* — ${formatDateWithWeekday(item.start_date)} → ${formatDateWithWeekday(item.end_date)} (${buildDurationText(item.start_date, item.end_date)})`,
-            );
+            const lines = items.map((item) => {
+                const onLeaveNow = item.start_date <= today && item.end_date >= today;
+                return `• ${onLeaveNow ? "🏖️ " : ""}*${item.employee_name}* — ${formatDateWithWeekday(item.start_date)} → ${formatDateWithWeekday(item.end_date)} (${buildDurationText(item.start_date, item.end_date)})`;
+            });
             return `*${label}*\n${lines.join("\n")}`;
         })
         .join("\n\n");
@@ -525,14 +527,15 @@ async function syncWorkspaceUsers(client) {
     return synced;
 }
 
-function buildTeamMembersPreviewText(teamMembers) {
+function buildTeamMembersPreviewText(teamMembers, onLeaveIds = []) {
     if (!teamMembers.length) {
         return "No active team members yet.";
     }
 
+    const onLeaveSet = new Set(onLeaveIds);
     const preview = teamMembers
         .slice(0, 10)
-        .map((member) => `• ${member.employee_name}`)
+        .map((member) => `• ${member.employee_name}${onLeaveSet.has(member.slack_user_id) ? " 🏖️" : ""}`)
         .join("\n");
 
     const extraCount =
@@ -1216,7 +1219,7 @@ async function publishHomeTab(client, userId) {
                 type: "section",
                 text: {
                     type: "mrkdwn",
-                    text: `Hey <@${userId}>! You can view and manage your team's leaves here.\n\n*Managers*\n${managerSummaryText(managerIds)}\n\n*Active team members (${activeTeamMembers.length})*\n${buildTeamMembersPreviewText(activeTeamMembers)}`,
+                    text: `Hey <@${userId}>! You can view and manage your team's leaves here.\n\n*Managers*\n${managerSummaryText(managerIds)}\n\n*Active team members (${activeTeamMembers.length})*\n${buildTeamMembersPreviewText(activeTeamMembers, currentlyOnLeave.map((r) => r.slack_user_id))}`,
                 },
             },
             {
@@ -2213,7 +2216,7 @@ app.command("/timeoff", async ({ ack, respond }) => {
     try {
         const upcomingTimeOff = await getUpcomingApprovedTimeOff();
         await respond({
-            response_type: "in_channel",
+            response_type: "ephemeral",
             text: "Upcoming approved time off",
             blocks: [
                 {
