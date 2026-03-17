@@ -899,6 +899,9 @@ function buildLeaveListSection(title, rows, emptyText) {
     return blocks;
 }
 
+// URL buttons still fire an action event — must ack() or Slack retries indefinitely
+app.action("open_web_calendar_link", async ({ ack }) => { await ack(); });
+
 app.action("view_all_leaves", async ({ ack, body, client }) => {
     await ack();
     const year = new Date().getFullYear();
@@ -1823,9 +1826,10 @@ async function sendApprovalRequests(client, request) {
         return;
     }
 
+    const refs = [];
     for (const managerId of targetManagers) {
         const dm = await client.conversations.open({ users: managerId });
-        await client.chat.postMessage({
+        const msg = await client.chat.postMessage({
             channel: dm.channel.id,
             text: `Time off request from ${request.employee_name}`,
             blocks: [
@@ -1839,41 +1843,65 @@ async function sendApprovalRequests(client, request) {
                 buildApprovalActionBlock(request.id),
             ],
         });
+        if (msg.ok) {
+            refs.push({ channelId: dm.channel.id, messageTs: msg.ts });
+        }
+    }
+
+    if (refs.length) {
+        await supabase
+            .from("time_off_requests")
+            .update({ approval_message_refs: refs })
+            .eq("id", request.id);
     }
 }
 
 async function updateApprovalSurface(client, body, statusLabel, data) {
     const statusEmoji = statusLabel === "Approved" ? "✅" : "❌";
     const summaryText = buildReadableStatusMessage(statusEmoji, statusLabel, data.employee_name, data.start_date, data.end_date, data.reason);
+    const updatedBlocks = [{ type: "section", text: { type: "mrkdwn", text: summaryText } }];
+    const updatedText = `${statusLabel}: ${data.employee_name}`;
 
-    // Updated logic to support Block Actions from messages as well
+    // Update ALL managers' approval messages stored in DB
+    const refs = Array.isArray(data.approval_message_refs) ? data.approval_message_refs : [];
+    await Promise.allSettled(
+        refs.map((ref) =>
+            client.chat.update({
+                channel: ref.channelId,
+                ts: ref.messageTs,
+                text: updatedText,
+                blocks: updatedBlocks,
+            }),
+        ),
+    );
+    // Clear refs so they can't be acted on again
+    if (refs.length) {
+        await supabase
+            .from("time_off_requests")
+            .update({ approval_message_refs: [] })
+            .eq("id", data.id);
+    }
+
+    // Also update the specific message the manager clicked (in case it's not in refs yet,
+    // e.g. for old requests created before this feature)
     const channelId = body.channel?.id || body.container?.channel_id;
     const messageTs = body.message?.ts || body.container?.message_ts;
-
-    if (channelId && messageTs) {
+    if (channelId && messageTs && !refs.some((r) => r.messageTs === messageTs)) {
         await client.chat.update({
             channel: channelId,
             ts: messageTs,
-            text: `${statusLabel}: ${data.employee_name}`,
-            blocks: [
-                {
-                    type: "section",
-                    text: {
-                        type: "mrkdwn",
-                        text: summaryText,
-                    },
-                },
-            ],
+            text: updatedText,
+            blocks: updatedBlocks,
         });
         return;
     }
 
-    if (body.view && body.user && body.user.id) {
+    if (!refs.length && body.view && body.user && body.user.id) {
         await publishHomeTab(client, body.user.id);
         return;
     }
 
-    console.warn("Unknown Slack surface for approval action.", {
+    if (!refs.length) console.warn("Unknown Slack surface for approval action.", {
         hasChannel: Boolean(body.channel),
         hasMessage: Boolean(body.message),
         hasView: Boolean(body.view),
@@ -2544,10 +2572,6 @@ app.action("approve_timeoff", async ({ ack, action, body, client }) => {
     await ack();
 
     try {
-        if (body.user && body.user.id) {
-            await notifyRequester(client, body.user.id, "⏳ Approving request...");
-        }
-
         const { data, error } = await supabase
             .from("time_off_requests")
             .update({ status: "approved" })
@@ -2581,10 +2605,6 @@ app.action("reject_timeoff", async ({ ack, action, body, client }) => {
     await ack();
 
     try {
-        if (body.user && body.user.id) {
-            await notifyRequester(client, body.user.id, "⏳ Rejecting request...");
-        }
-
         const { data, error } = await supabase
             .from("time_off_requests")
             .update({ status: "rejected" })
