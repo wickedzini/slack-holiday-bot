@@ -2708,3 +2708,15 @@ function scheduleLeaveReminders() {
     console.log(`⚡ Slack bot running on port ${process.env.PORT || 3000}`);
     scheduleLeaveReminders();
 })();
+
+// Health check endpoint — keeps Render free instance alive via external ping
+const http = require("http");
+http.createServer((req, res) => {
+    if (req.url === "/health" || req.url === "/") {
+        res.writeHead(200);
+        res.end("OK");
+    } else {
+        res.writeHead(404);
+        res.end();
+    }
+}).listen(Number(process.env.HEALTH_PORT || 8080));
