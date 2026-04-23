@@ -897,6 +897,7 @@ const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, `http://${req.headers.host}`);
 
     // Auth routes — no session required
+    if (url.pathname === "/health") { res.writeHead(200); res.end("OK"); return; }
     if (url.pathname === "/oauth/start") { handleOAuthStart(req, res); return; }
     if (url.pathname === "/oauth/callback") { await handleOAuthCallback(req, res, url); return; }
     if (url.pathname === "/login" && req.method === "GET") {
