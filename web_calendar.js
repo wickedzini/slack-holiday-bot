@@ -1,4 +1,3 @@
-const http = require("http");
 const crypto = require("crypto");
 const { URL } = require("url");
 const { createClient } = require("@supabase/supabase-js");
@@ -8,7 +7,6 @@ const supabase = createClient(
     process.env.SUPABASE_SERVICE_ROLE_KEY,
 );
 
-const PORT = Number(process.env.PORT || process.env.WEB_CALENDAR_PORT || 4000);
 const DEFAULT_ANNUAL_LEAVE_DAYS = 26;
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
@@ -893,49 +891,46 @@ async function handleApiDashboardData(res, session) {
     }
 }
 
-const server = http.createServer(async (req, res) => {
-    const url = new URL(req.url, `http://${req.headers.host}`);
-
-    // Auth routes — no session required
-    if (url.pathname === "/health") { res.writeHead(200); res.end("OK"); return; }
-    if (url.pathname === "/oauth/start") { handleOAuthStart(req, res); return; }
-    if (url.pathname === "/oauth/callback") { await handleOAuthCallback(req, res, url); return; }
-    if (url.pathname === "/login" && req.method === "GET") {
+// Attach all web calendar routes to an Express router (used by app.js)
+module.exports = function attachWebCalendar(router) {
+    // Public routes — no auth required
+    router.get("/health", (_req, res) => { res.writeHead(200); res.end("OK"); });
+    router.get("/oauth/start", (req, res) => handleOAuthStart(req, res));
+    router.get("/oauth/callback", async (req, res) => {
+        const url = new URL(req.url, `http://${req.headers.host}`);
+        await handleOAuthCallback(req, res, url);
+    });
+    router.get("/login", (_req, res) => {
         res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
         res.end(renderLoginPage());
-        return;
-    }
-    if (url.pathname === "/login" && req.method === "POST") {
+    });
+    router.post("/login", async (req, res) => {
         await handleLoginPost(req, res);
-        return;
+    });
+
+    // Helper: check session and refresh cookie, returns session or null
+    function requireSession(req, res) {
+        const session = getSession(req);
+        if (!session) {
+            res.writeHead(302, { Location: OAUTH_ENABLED ? "/oauth/start" : "/login" });
+            res.end();
+            return null;
+        }
+        if (session.userId) setSessionCookie(res, session.userId, session.isManager);
+        return session;
     }
 
-    // All other routes require a valid session
-    const session = getSession(req);
-    if (!session) {
-        // Redirect to appropriate login method
-        res.writeHead(302, { Location: OAUTH_ENABLED ? "/oauth/start" : "/login" });
-        res.end();
-        return;
-    }
-    // Refresh cookie on every visit (sliding 30-day window)
-    if (session.userId) setSessionCookie(res, session.userId, session.isManager);
-
-    if (url.pathname === "/api/dashboard-data") {
+    // Protected routes
+    router.get("/api/dashboard-data", async (req, res) => {
+        const session = requireSession(req, res);
+        if (!session) return;
         await handleApiDashboardData(res, session);
-        return;
-    }
+    });
 
-    if (url.pathname === "/" || url.pathname === "/calendar") {
+    router.get(["/", "/calendar"], (req, res) => {
+        const session = requireSession(req, res);
+        if (!session) return;
         res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
         res.end(renderHtml());
-        return;
-    }
-
-    res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
-    res.end("Not found");
-});
-
-server.listen(PORT, () => {
-    console.log(`🌴 Web calendar running on http://localhost:${PORT}`);
-});
+    });
+};

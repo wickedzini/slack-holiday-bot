@@ -1,10 +1,17 @@
-const { App } = require("@slack/bolt");
+const { App, ExpressReceiver } = require("@slack/bolt");
 const { createClient } = require("@supabase/supabase-js");
+const attachWebCalendar = require("./web_calendar");
+
+const receiver = new ExpressReceiver({
+    signingSecret: process.env.SLACK_SIGNING_SECRET,
+});
 
 const app = new App({
     token: process.env.SLACK_BOT_TOKEN,
-    signingSecret: process.env.SLACK_SIGNING_SECRET,
+    receiver,
 });
+
+attachWebCalendar(receiver.router);
 
 const supabase = createClient(
     process.env.SUPABASE_URL,
@@ -2709,14 +2716,3 @@ function scheduleLeaveReminders() {
     scheduleLeaveReminders();
 })();
 
-// Health check endpoint — keeps Render free instance alive via external ping
-const http = require("http");
-http.createServer((req, res) => {
-    if (req.url === "/health" || req.url === "/") {
-        res.writeHead(200);
-        res.end("OK");
-    } else {
-        res.writeHead(404);
-        res.end();
-    }
-}).listen(Number(process.env.HEALTH_PORT || 8080));
