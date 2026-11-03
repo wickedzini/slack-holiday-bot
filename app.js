@@ -1671,24 +1671,36 @@ async function openRemoveTeamMembersModal(client, triggerId, method = "open") {
                             : "No active team members yet.",
                     },
                 },
-                {
-                    type: "input",
-                    block_id: "users",
-                    optional: true,
-                    label: {
-                        type: "plain_text",
-                        text: "Select users to deactivate",
-                    },
-                    element: {
-                        type: "multi_users_select",
-                        action_id: "user_ids",
-                        placeholder: {
-                            type: "plain_text",
-                            text: "Choose users to remove from active team",
+                // Options come from team_members (not Slack's user picker), so users
+                // already deleted from the Slack workspace can still be deactivated.
+                ...(teamMembers.length
+                    ? [
+                        {
+                            type: "input",
+                            block_id: "users",
+                            optional: true,
+                            label: {
+                                type: "plain_text",
+                                text: "Select users to deactivate",
+                            },
+                            element: {
+                                type: "multi_static_select",
+                                action_id: "user_ids",
+                                placeholder: {
+                                    type: "plain_text",
+                                    text: "Choose users to remove from active team",
+                                },
+                                options: teamMembers.slice(0, 100).map((member) => ({
+                                    text: {
+                                        type: "plain_text",
+                                        text: (member.employee_name || member.slack_user_id).slice(0, 75),
+                                    },
+                                    value: member.slack_user_id,
+                                })),
+                            },
                         },
-                        initial_users: [],
-                    },
-                },
+                    ]
+                    : []),
             ],
         },
     });
@@ -2069,7 +2081,7 @@ app.view("remove_team_members_form", async ({ ack, body, view, client }) => {
     await ack();
 
     try {
-        const slackUserIds = view.state.values.users.user_ids.selected_users || [];
+        const slackUserIds = (view.state.values.users?.user_ids?.selected_options || []).map((option) => option.value);
 
         await deactivateTeamMembers(slackUserIds);
 
